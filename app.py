@@ -66,8 +66,9 @@ ALL_LLM_MODELS = [model for models in LLM_MODELS.values() for model in models]
 # Custom CSS - AWS re:Invent 2025 Dark Theme
 st.markdown("""
 <style>
-    /* Import fallback fonts from Google Fonts */
+    /* Import fonts from Google Fonts */
     @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;500;600;700&family=Fira+Mono:wght@400;500;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0');
 
     /* Hide Streamlit top bar, menu, and decorations */
     #MainMenu {visibility: hidden;}
@@ -86,11 +87,17 @@ st.markdown("""
 
     /* Set primary font family globally */
     html, body, [class*="css"] {
-        font-family: "Amazon Ember", "EmberDisplay", "Open Sans", -apple-system, BlinkMacSystemFont, sans-serif !important;
+        font-family: "Amazon Ember", "EmberDisplay", "Open Sans", -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
-    .stApp, .stApp * {
-        font-family: "Amazon Ember", "EmberDisplay", "Open Sans", -apple-system, BlinkMacSystemFont, sans-serif !important;
+    .stApp {
+        font-family: "Amazon Ember", "EmberDisplay", "Open Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    /* Apply font to text elements only */
+    .stApp p, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+    .stApp input, .stApp textarea {
+        font-family: "Amazon Ember", "EmberDisplay", "Open Sans", -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
     /* Secondary/mono font for code and captions */
@@ -1134,15 +1141,12 @@ with st.sidebar:
     st.divider()
 
     # Navigation
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Talks", use_container_width=True):
-            st.session_state.active_view = "talks"
-            st.session_state.selected_talk = None
-    with col2:
-        if st.button("Search", use_container_width=True):
-            st.session_state.active_view = "search"
-            st.session_state.selected_talk = None
+    if st.button("Talks", use_container_width=True, icon=":material/home:"):
+        st.session_state.active_view = "talks"
+        st.session_state.selected_talk = None
+    if st.button("Search", use_container_width=True, icon=":material/search:"):
+        st.session_state.active_view = "search"
+        st.session_state.selected_talk = None
 
     st.divider()
 
@@ -1186,7 +1190,7 @@ if st.session_state.active_view == "talks":
         with col2:
             new_speaker = st.text_input("Speaker (optional)", placeholder="John Doe")
 
-        if st.form_submit_button("Create Talk", type="primary", use_container_width=True):
+        if st.form_submit_button("Create Talk", type="primary", use_container_width=True, icon=":material/add:"):
             if new_title:
                 talk_id = create_talk(new_title, new_speaker or None)
                 if talk_id:
@@ -1216,7 +1220,7 @@ if st.session_state.active_view == "talks":
                     with col_b:
                         st.metric("Slides", t.get('slide_count', 0))
 
-                    if st.button("Open", key=f"open_{t['id']}", use_container_width=True):
+                    if st.button("Open", key=f"open_{t['id']}", use_container_width=True, icon=":material/arrow_forward:"):
                         st.session_state.selected_talk = t["id"]
                         st.session_state.active_view = "talk_detail"
                         st.rerun()
@@ -1295,7 +1299,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
     st.divider()
 
     # Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Upload", "Summary", "Insights", "Search", "Export", "Manage"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([":material/upload: Upload", ":material/summarize: Summary", ":material/lightbulb: Insights", ":material/search: Search", ":material/download: Export", ":material/settings: Manage"])
 
     with tab1:
         st.markdown("### Upload Content")
@@ -1316,7 +1320,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             st.markdown('</div>', unsafe_allow_html=True)
 
             if uploaded_audio:
-                if st.button("Transcribe Audio", type="primary", use_container_width=True):
+                if st.button("Transcribe Audio", type="primary", use_container_width=True, icon=":material/mic:"):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_audio.name)[1]) as tmp:
                         tmp.write(uploaded_audio.getvalue())
                         tmp_path = tmp.name
@@ -1353,7 +1357,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             if uploaded_images:
                 st.markdown(f"**{len(uploaded_images)} slides selected**")
 
-                if st.button("Process Slides", type="primary", use_container_width=True):
+                if st.button("Process Slides", type="primary", use_container_width=True, icon=":material/image:"):
                     images_to_process = []
                     for uf in uploaded_images:
                         img = Image.open(io.BytesIO(uf.getvalue()))
@@ -1381,7 +1385,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             st.session_state.current_summary = saved_summary["content"]
             st.session_state.current_summary_model = saved_summary["model_used"]
 
-        if st.button(f"Generate AI Summary (using {st.session_state.selected_model})", type="primary", use_container_width=True):
+        if st.button(f"Generate AI Summary (using {st.session_state.selected_model})", type="primary", use_container_width=True, icon=":material/auto_awesome:"):
             with st.spinner("Generating comprehensive summary..."):
                 st.session_state.current_summary = generate_talk_summary(talk["id"], st.session_state.selected_model)
                 st.session_state.current_summary_model = st.session_state.selected_model
@@ -1421,7 +1425,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             st.markdown("#### Key Quotes & Highlights")
             col1, col2 = st.columns([3, 1])
             with col2:
-                if st.button("Extract Quotes", use_container_width=True):
+                if st.button("Extract Quotes", use_container_width=True, icon=":material/format_quote:"):
                     with st.spinner("Extracting key quotes..."):
                         st.session_state.insights_quotes = extract_key_quotes(talk["id"], st.session_state.selected_model)
                         st.session_state.insights_quotes_model = st.session_state.selected_model
@@ -1439,7 +1443,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             st.markdown("#### Action Items & Recommendations")
             col1, col2 = st.columns([3, 1])
             with col2:
-                if st.button("Extract Actions", use_container_width=True):
+                if st.button("Extract Actions", use_container_width=True, icon=":material/checklist:"):
                     with st.spinner("Extracting action items..."):
                         st.session_state.insights_actions = extract_action_items(talk["id"], st.session_state.selected_model)
                         st.session_state.insights_actions_model = st.session_state.selected_model
@@ -1486,7 +1490,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                 st.rerun()
 
             if st.session_state.chat_history:
-                if st.button("Clear Chat History", type="secondary"):
+                if st.button("Clear Chat History", type="secondary", icon=":material/delete:"):
                     st.session_state.chat_history = []
                     save_chat_history(talk["id"], [], st.session_state.selected_model)
                     st.rerun()
@@ -1520,7 +1524,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
 
         include_transcript = st.checkbox("Include full transcript", value=True)
 
-        if st.button("Generate Export", use_container_width=True):
+        if st.button("Generate Export", use_container_width=True, icon=":material/file_download:"):
             with st.spinner("Generating export..."):
                 md_content = export_to_markdown(talk["id"], include_transcript)
 
@@ -1544,7 +1548,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
 
         confirm = st.checkbox(f"I understand this will delete '{talk['title']}'")
 
-        if st.button("Delete Talk", type="secondary", disabled=not confirm):
+        if st.button("Delete Talk", type="secondary", disabled=not confirm, icon=":material/delete_forever:"):
             delete_talk(talk["id"])
             st.success("Talk deleted")
             st.session_state.active_view = "talks"
