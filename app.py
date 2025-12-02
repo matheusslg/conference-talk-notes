@@ -481,6 +481,211 @@ st.markdown("""
     a:hover {
         color: #f472b6 !important;
     }
+
+    /* Mobile navigation - hidden on desktop */
+    [data-testid="stVerticalBlock"] > [data-testid="element-container"]:has(> [data-testid="stVerticalBlockBorderWrapper"][data-key="mobile_nav"]),
+    div[data-key="mobile_nav"] {
+        display: none;
+    }
+
+    /* ============== RESPONSIVE DESIGN ============== */
+
+    /* Tablet breakpoint */
+    @media (max-width: 992px) {
+        /* Reduce padding on main content */
+        .main .block-container {
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+        }
+
+        /* Smaller headers */
+        h1 {
+            font-size: 1.75rem !important;
+        }
+
+        h2, h3 {
+            font-size: 1.25rem !important;
+        }
+
+        /* Tabs: smaller padding */
+        .stTabs [data-baseweb="tab"] {
+            padding: 8px 12px;
+            font-size: 0.85rem;
+        }
+
+        /* Talk cards: reduce min-height */
+        .talk-card {
+            min-height: 150px;
+            padding: 15px;
+        }
+    }
+
+    /* Mobile breakpoint */
+    @media (max-width: 768px) {
+        /* Tighter main content padding */
+        .main .block-container {
+            padding-left: 0.5rem !important;
+            padding-right: 0.5rem !important;
+            padding-top: 1rem !important;
+        }
+
+        /* Smaller headers for mobile */
+        h1 {
+            font-size: 1.5rem !important;
+        }
+
+        h2 {
+            font-size: 1.2rem !important;
+        }
+
+        h3 {
+            font-size: 1.1rem !important;
+        }
+
+        /* Tabs: horizontal scroll with smaller tabs */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 4px;
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+        }
+
+        .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar {
+            display: none;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            padding: 8px 10px;
+            font-size: 0.8rem;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        /* Hide sidebar completely on mobile */
+        [data-testid="stSidebar"] {
+            display: none !important;
+        }
+
+        /* Hide the sidebar collapse button on mobile */
+        [data-testid="collapsedControl"] {
+            display: none !important;
+        }
+
+        /* Show mobile nav */
+        [data-testid="stVerticalBlock"] > [data-testid="element-container"]:has(> [data-testid="stVerticalBlockBorderWrapper"][data-key="mobile_nav"]),
+        div[data-key="mobile_nav"] {
+            display: block !important;
+        }
+
+        /* Reduce top padding on mobile */
+        .stMain > .block-container,
+        .stMainBlockContainer,
+        section.main > div {
+            padding-top: 2rem !important;
+        }
+
+        /* Hide desktop-only elements on mobile */
+        .desktop-only,
+        .desktop-only + div {
+            display: none !important;
+        }
+
+        /* Talk cards: stack vertically, full width */
+        .talk-card {
+            min-height: auto;
+            padding: 12px;
+            margin-bottom: 8px;
+        }
+
+        /* Containers with border: less padding */
+        [data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
+            padding: 12px;
+        }
+
+        /* Summary container: less padding */
+        .summary-container {
+            padding: 12px;
+        }
+
+        /* Upload container: less padding */
+        .upload-container {
+            padding: 12px;
+        }
+
+        /* Danger zone: less padding */
+        .danger-zone {
+            padding: 10px;
+        }
+
+        /* Form: less padding */
+        [data-testid="stForm"] {
+            padding: 12px;
+        }
+
+        /* Buttons: ensure touch-friendly size */
+        .stButton > button {
+            min-height: 44px;
+            font-size: 0.9rem;
+        }
+
+        /* Metrics: smaller */
+        [data-testid="stMetricValue"] {
+            font-size: 1.5rem !important;
+        }
+
+        [data-testid="stMetricLabel"] {
+            font-size: 0.75rem !important;
+        }
+
+        /* Chat messages: less padding */
+        [data-testid="stChatMessage"] {
+            padding: 8px !important;
+        }
+
+        /* Expanders: smaller text */
+        .streamlit-expanderHeader {
+            font-size: 0.9rem;
+        }
+
+        /* File uploader: less padding */
+        [data-testid="stFileUploader"] {
+            padding: 8px;
+        }
+    }
+
+    /* Small mobile breakpoint */
+    @media (max-width: 480px) {
+        /* Even tighter padding */
+        .main .block-container {
+            padding-left: 0.25rem !important;
+            padding-right: 0.25rem !important;
+        }
+
+        /* Smaller headers */
+        h1 {
+            font-size: 1.3rem !important;
+        }
+
+        h2 {
+            font-size: 1.1rem !important;
+        }
+
+        h3 {
+            font-size: 1rem !important;
+        }
+
+        /* Tabs: even smaller */
+        .stTabs [data-baseweb="tab"] {
+            padding: 6px 8px;
+            font-size: 0.75rem;
+        }
+
+        /* Metrics: even smaller */
+        [data-testid="stMetricValue"] {
+            font-size: 1.25rem !important;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1175,11 +1380,40 @@ with st.sidebar:
     else:
         st.info("No talks yet. Create one above!")
 
+# ============== Mobile Header ==============
+# This container shows only on mobile (hidden via CSS on desktop)
+
+with st.container(key="mobile_nav"):
+    st.markdown("### Conference Talk Notes")
+    st.caption("AWS re:Invent 2025")
+    mobile_cols = st.columns(3)
+    with mobile_cols[0]:
+        if st.button("Talks", key="mobile_talks", use_container_width=True, icon=":material/home:"):
+            st.session_state.active_view = "talks"
+            st.session_state.selected_talk = None
+            st.rerun()
+    with mobile_cols[1]:
+        if st.button("Search", key="mobile_search", use_container_width=True, icon=":material/search:"):
+            st.session_state.active_view = "search"
+            st.session_state.selected_talk = None
+            st.rerun()
+    with mobile_cols[2]:
+        st.session_state.selected_model = st.selectbox(
+            "Model",
+            available_models,
+            index=available_models.index(st.session_state.selected_model) if st.session_state.selected_model in available_models else 0,
+            key="mobile_model",
+            label_visibility="collapsed"
+        )
+
 # ============== Main Content ==============
 
 if st.session_state.active_view == "talks":
+    # Desktop title (hidden on mobile via CSS)
+    st.markdown('<div class="desktop-only">', unsafe_allow_html=True)
     st.title("Conference Talk Notes")
     st.markdown("Capture, search, and summarize AWS re:Invent sessions")
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # New Talk form in main content
     st.markdown("### Add New Talk")
