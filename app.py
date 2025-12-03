@@ -36,6 +36,16 @@ def check_password():
     st.title("Conference Talk Notes")
     st.caption("AWS re:Invent 2025")
     st.text_input("Password", type="password", on_change=password_entered, key="password")
+    # Autofocus password field
+    st.markdown('''
+    <script>
+        // Autofocus password input
+        setTimeout(() => {
+            const pwInput = document.querySelector('input[type="password"]');
+            if (pwInput) pwInput.focus();
+        }, 100);
+    </script>
+    ''', unsafe_allow_html=True)
     if "password_correct" in st.session_state and not st.session_state["password_correct"]:
         st.error("Incorrect password")
     return False
@@ -140,19 +150,10 @@ st.markdown("""
         color: #ffffff !important;
     }
 
-    /* Sidebar styling */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #1a1a2e 0%, #0a0a0a 100%);
-        border-right: 1px solid #2d2d44;
-    }
-
-    [data-testid="stSidebar"] * {
-        color: #ffffff !important;
-    }
-
-    [data-testid="stSidebar"] .stCaption,
-    [data-testid="stSidebar"] small {
-        color: #a1a1aa !important;
+    /* Hide sidebar completely */
+    [data-testid="stSidebar"],
+    [data-testid="collapsedControl"] {
+        display: none !important;
     }
 
     /* Talk cards */
@@ -482,12 +483,6 @@ st.markdown("""
         color: #f472b6 !important;
     }
 
-    /* Mobile navigation - hidden on desktop */
-    [data-testid="stVerticalBlock"] > [data-testid="element-container"]:has(> [data-testid="stVerticalBlockBorderWrapper"][data-key="mobile_nav"]),
-    div[data-key="mobile_nav"] {
-        display: none;
-    }
-
     /* ============== RESPONSIVE DESIGN ============== */
 
     /* Tablet breakpoint */
@@ -562,21 +557,6 @@ st.markdown("""
             flex-shrink: 0;
         }
 
-        /* Hide sidebar completely on mobile */
-        [data-testid="stSidebar"] {
-            display: none !important;
-        }
-
-        /* Hide the sidebar collapse button on mobile */
-        [data-testid="collapsedControl"] {
-            display: none !important;
-        }
-
-        /* Show mobile nav */
-        [data-testid="stVerticalBlock"] > [data-testid="element-container"]:has(> [data-testid="stVerticalBlockBorderWrapper"][data-key="mobile_nav"]),
-        div[data-key="mobile_nav"] {
-            display: block !important;
-        }
 
         /* Reduce top padding on mobile */
         .stMain > .block-container,
@@ -585,11 +565,6 @@ st.markdown("""
             padding-top: 2rem !important;
         }
 
-        /* Hide desktop-only elements on mobile */
-        .desktop-only,
-        .desktop-only + div {
-            display: none !important;
-        }
 
         /* Talk cards: stack vertically, full width */
         .talk-card {
@@ -777,27 +752,26 @@ def get_available_models() -> list:
 # ============== AI Content Persistence ==============
 
 def save_ai_content(talk_id: str, content_type: str, content: str, model: str):
-    """Save or update AI-generated content."""
-    # Try to update existing
-    existing = supabase.from_("talk_ai_content").select("id").eq("talk_id", talk_id).eq("content_type", content_type).execute()
+    """Save AI-generated content (always creates new entry for history)."""
+    supabase.from_("talk_ai_content").insert({
+        "talk_id": talk_id,
+        "content_type": content_type,
+        "content": content,
+        "model_used": model
+    }).execute()
 
-    if existing.data:
-        supabase.from_("talk_ai_content").update({
-            "content": content,
-            "model_used": model,
-            "updated_at": "now()"
-        }).eq("id", existing.data[0]["id"]).execute()
-    else:
-        supabase.from_("talk_ai_content").insert({
-            "talk_id": talk_id,
-            "content_type": content_type,
-            "content": content,
-            "model_used": model
-        }).execute()
+def get_all_ai_content(talk_id: str, content_type: str) -> list:
+    """Get all stored AI content for a content type, ordered by newest first."""
+    result = supabase.from_("talk_ai_content").select("id, content, model_used, created_at").eq("talk_id", talk_id).eq("content_type", content_type).order("created_at", desc=True).execute()
+    return result.data or []
+
+def delete_ai_content(content_id: str):
+    """Delete a specific AI content entry."""
+    supabase.from_("talk_ai_content").delete().eq("id", content_id).execute()
 
 def get_ai_content(talk_id: str, content_type: str) -> dict:
-    """Get stored AI content. Returns dict with 'content' and 'model_used' or None."""
-    result = supabase.from_("talk_ai_content").select("content, model_used, updated_at").eq("talk_id", talk_id).eq("content_type", content_type).execute()
+    """Get most recent AI content. Returns dict with 'content' and 'model_used' or None."""
+    result = supabase.from_("talk_ai_content").select("content, model_used, created_at").eq("talk_id", talk_id).eq("content_type", content_type).order("created_at", desc=True).limit(1).execute()
     return result.data[0] if result.data else None
 
 def get_chat_history(talk_id: str) -> list:
@@ -846,6 +820,27 @@ def delete_talk(talk_id: str) -> bool:
 def get_talk_chunks(talk_id: str) -> list:
     result = supabase.from_("talk_chunks").select("*").eq("talk_id", talk_id).order("created_at").execute()
     return result.data or []
+
+def get_uploaded_files(talk_id: str) -> dict:
+    """Get list of uploaded files grouped by type."""
+    chunks = supabase.from_("talk_chunks").select("source_file, content_type, created_at").eq("talk_id", talk_id).order("created_at").execute()
+
+    files = {"audio": [], "slides": []}
+    seen_audio = set()
+    seen_slides = set()
+
+    for c in (chunks.data or []):
+        filename = c["source_file"]
+        if c["content_type"] == "audio_transcript":
+            if filename not in seen_audio:
+                seen_audio.add(filename)
+                files["audio"].append(filename)
+        elif c["content_type"] in ("slide_ocr", "slide_vision"):
+            if filename not in seen_slides:
+                seen_slides.add(filename)
+                files["slides"].append(filename)
+
+    return files
 
 # ============== Audio Ingestion ==============
 
@@ -1316,18 +1311,6 @@ if "selected_talk" not in st.session_state:
     st.session_state.selected_talk = None
 if "selected_model" not in st.session_state:
     st.session_state.selected_model = "gemini-2.5-flash"
-if "current_summary" not in st.session_state:
-    st.session_state.current_summary = None
-if "current_summary_model" not in st.session_state:
-    st.session_state.current_summary_model = None
-if "insights_quotes" not in st.session_state:
-    st.session_state.insights_quotes = None
-if "insights_quotes_model" not in st.session_state:
-    st.session_state.insights_quotes_model = None
-if "insights_actions" not in st.session_state:
-    st.session_state.insights_actions = None
-if "insights_actions_model" not in st.session_state:
-    st.session_state.insights_actions_model = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
@@ -1337,83 +1320,33 @@ talks = get_all_talks()
 # Get available models (based on configured API keys)
 available_models = get_available_models()
 
-# ============== Sidebar ==============
+# ============== Top Navigation ==============
 
-with st.sidebar:
-    st.header("Conference Talk Notes")
-    st.caption("AWS re:Invent 2025")
-
-    st.divider()
-
-    # Navigation
-    if st.button("Talks", use_container_width=True, icon=":material/home:"):
+st.markdown("#### Conference Talk Notes")
+st.caption("AWS re:Invent 2025")
+nav_cols = st.columns(3)
+with nav_cols[0]:
+    if st.button("Talks", key="nav_talks", use_container_width=True, icon=":material/home:"):
         st.session_state.active_view = "talks"
         st.session_state.selected_talk = None
-    if st.button("Search", use_container_width=True, icon=":material/search:"):
+        st.rerun()
+with nav_cols[1]:
+    if st.button("Search", key="nav_search", use_container_width=True, icon=":material/search:"):
         st.session_state.active_view = "search"
         st.session_state.selected_talk = None
-
-    st.divider()
-
-    # Model selector
-    st.subheader("AI Model")
+        st.rerun()
+with nav_cols[2]:
     st.session_state.selected_model = st.selectbox(
-        "Select model for AI generation",
+        "Model",
         available_models,
         index=available_models.index(st.session_state.selected_model) if st.session_state.selected_model in available_models else 0,
+        key="nav_model",
         label_visibility="collapsed"
     )
-
-    st.divider()
-
-    # Talk list
-    st.subheader(f"Your Talks ({len(talks)})")
-
-    if talks:
-        for t in talks:
-            display_name = t["title"][:30] + "..." if len(t["title"]) > 30 else t["title"]
-            if st.button(display_name, key=f"talk_{t['id']}", use_container_width=True):
-                st.session_state.selected_talk = t["id"]
-                st.session_state.active_view = "talk_detail"
-                st.session_state.current_summary = None
-                st.rerun()
-    else:
-        st.info("No talks yet. Create one above!")
-
-# ============== Mobile Header ==============
-# This container shows only on mobile (hidden via CSS on desktop)
-
-with st.container(key="mobile_nav"):
-    st.markdown("### Conference Talk Notes")
-    st.caption("AWS re:Invent 2025")
-    mobile_cols = st.columns(3)
-    with mobile_cols[0]:
-        if st.button("Talks", key="mobile_talks", use_container_width=True, icon=":material/home:"):
-            st.session_state.active_view = "talks"
-            st.session_state.selected_talk = None
-            st.rerun()
-    with mobile_cols[1]:
-        if st.button("Search", key="mobile_search", use_container_width=True, icon=":material/search:"):
-            st.session_state.active_view = "search"
-            st.session_state.selected_talk = None
-            st.rerun()
-    with mobile_cols[2]:
-        st.session_state.selected_model = st.selectbox(
-            "Model",
-            available_models,
-            index=available_models.index(st.session_state.selected_model) if st.session_state.selected_model in available_models else 0,
-            key="mobile_model",
-            label_visibility="collapsed"
-        )
 
 # ============== Main Content ==============
 
 if st.session_state.active_view == "talks":
-    # Desktop title (hidden on mobile via CSS)
-    st.markdown('<div class="desktop-only">', unsafe_allow_html=True)
-    st.title("Conference Talk Notes")
-    st.markdown("Capture, search, and summarize AWS re:Invent sessions")
-    st.markdown('</div>', unsafe_allow_html=True)
 
     # New Talk form in main content
     st.markdown("### Add New Talk")
@@ -1612,26 +1545,50 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                     else:
                         st.error(result['messages'][-1])
 
+        # Previously uploaded files section
+        st.divider()
+        st.markdown("### Previously Uploaded")
+
+        uploaded_files = get_uploaded_files(talk["id"])
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Audio Files**")
+            if uploaded_files["audio"]:
+                for f in uploaded_files["audio"]:
+                    st.caption(f":material/mic: {f}")
+            else:
+                st.caption("No audio files uploaded")
+
+        with col2:
+            st.markdown("**Slide Images**")
+            if uploaded_files["slides"]:
+                for f in uploaded_files["slides"]:
+                    st.caption(f":material/image: {f}")
+            else:
+                st.caption("No slides uploaded")
+
     with tab2:
-        # Load saved summary if exists
-        saved_summary = get_ai_content(talk["id"], "summary")
-        if saved_summary and not st.session_state.current_summary:
-            st.session_state.current_summary = saved_summary["content"]
-            st.session_state.current_summary_model = saved_summary["model_used"]
-
-        if st.button(f"Generate AI Summary (using {st.session_state.selected_model})", type="primary", use_container_width=True, icon=":material/auto_awesome:"):
-            with st.spinner("Generating comprehensive summary..."):
-                st.session_state.current_summary = generate_talk_summary(talk["id"], st.session_state.selected_model)
-                st.session_state.current_summary_model = st.session_state.selected_model
-
-        if st.session_state.current_summary:
-            if st.session_state.current_summary_model:
-                st.caption(f"Generated with: {st.session_state.current_summary_model}")
-            st.markdown('<div class="summary-container">', unsafe_allow_html=True)
-            st.markdown(st.session_state.current_summary)
-            st.markdown('</div>', unsafe_allow_html=True)
-        elif not chunks:
+        if not chunks:
             st.info("Upload audio or slides first to generate a summary.")
+        else:
+            if st.button(f"Generate Summary ({st.session_state.selected_model})", type="primary", use_container_width=True, icon=":material/auto_awesome:"):
+                with st.spinner("Generating comprehensive summary..."):
+                    generate_talk_summary(talk["id"], st.session_state.selected_model)
+                st.rerun()
+
+            # Load all saved summaries
+            saved_summaries = get_all_ai_content(talk["id"], "summary")
+
+            if saved_summaries:
+                st.markdown(f"### Generated Summaries ({len(saved_summaries)})")
+                for idx, item in enumerate(saved_summaries):
+                    timestamp = item['created_at'][:16].replace('T', ' ')
+                    with st.expander(f"{item['model_used']} — {timestamp}", expanded=(idx == 0)):
+                        st.markdown(item['content'])
+                        if st.button("Delete", key=f"del_summary_{item['id']}", icon=":material/delete:"):
+                            delete_ai_content(item['id'])
+                            st.rerun()
 
     with tab3:
         st.markdown("### Talk Insights")
@@ -1639,17 +1596,6 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
         if not chunks:
             st.info("Upload audio or slides first to generate insights.")
         else:
-            # Load saved insights if exists
-            saved_quotes = get_ai_content(talk["id"], "quotes")
-            if saved_quotes and not st.session_state.insights_quotes:
-                st.session_state.insights_quotes = saved_quotes["content"]
-                st.session_state.insights_quotes_model = saved_quotes["model_used"]
-
-            saved_actions = get_ai_content(talk["id"], "actions")
-            if saved_actions and not st.session_state.insights_actions:
-                st.session_state.insights_actions = saved_actions["content"]
-                st.session_state.insights_actions_model = saved_actions["model_used"]
-
             # Load saved chat history
             saved_chat = get_chat_history(talk["id"])
             if saved_chat and not st.session_state.chat_history:
@@ -1661,13 +1607,18 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             with col2:
                 if st.button("Extract Quotes", use_container_width=True, icon=":material/format_quote:"):
                     with st.spinner("Extracting key quotes..."):
-                        st.session_state.insights_quotes = extract_key_quotes(talk["id"], st.session_state.selected_model)
-                        st.session_state.insights_quotes_model = st.session_state.selected_model
+                        extract_key_quotes(talk["id"], st.session_state.selected_model)
+                    st.rerun()
 
-            if st.session_state.insights_quotes:
-                if st.session_state.insights_quotes_model:
-                    st.caption(f"Generated with: {st.session_state.insights_quotes_model}")
-                st.markdown(st.session_state.insights_quotes)
+            saved_quotes = get_all_ai_content(talk["id"], "quotes")
+            if saved_quotes:
+                for idx, item in enumerate(saved_quotes):
+                    timestamp = item['created_at'][:16].replace('T', ' ')
+                    with st.expander(f"{item['model_used']} — {timestamp}", expanded=(idx == 0)):
+                        st.markdown(item['content'])
+                        if st.button("Delete", key=f"del_quotes_{item['id']}", icon=":material/delete:"):
+                            delete_ai_content(item['id'])
+                            st.rerun()
             else:
                 st.caption("Click 'Extract Quotes' to find memorable quotes and statistics from this talk.")
 
@@ -1679,13 +1630,18 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             with col2:
                 if st.button("Extract Actions", use_container_width=True, icon=":material/checklist:"):
                     with st.spinner("Extracting action items..."):
-                        st.session_state.insights_actions = extract_action_items(talk["id"], st.session_state.selected_model)
-                        st.session_state.insights_actions_model = st.session_state.selected_model
+                        extract_action_items(talk["id"], st.session_state.selected_model)
+                    st.rerun()
 
-            if st.session_state.insights_actions:
-                if st.session_state.insights_actions_model:
-                    st.caption(f"Generated with: {st.session_state.insights_actions_model}")
-                st.markdown(st.session_state.insights_actions)
+            saved_actions = get_all_ai_content(talk["id"], "actions")
+            if saved_actions:
+                for idx, item in enumerate(saved_actions):
+                    timestamp = item['created_at'][:16].replace('T', ' ')
+                    with st.expander(f"{item['model_used']} — {timestamp}", expanded=(idx == 0)):
+                        st.markdown(item['content'])
+                        if st.button("Delete", key=f"del_actions_{item['id']}", icon=":material/delete:"):
+                            delete_ai_content(item['id'])
+                            st.rerun()
             else:
                 st.caption("Click 'Extract Actions' to find tasks and recommendations from this talk.")
 

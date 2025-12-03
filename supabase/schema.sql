@@ -87,4 +87,7 @@ create table if not exists talk_ai_content (
 );
 
 create index if not exists talk_ai_content_talk_id_idx on talk_ai_content(talk_id);
-create unique index if not exists talk_ai_content_unique_idx on talk_ai_content(talk_id, content_type);
+
+-- Migration: To support multiple AI generations per content type, run:
+-- DROP INDEX IF EXISTS talk_ai_content_unique_idx;
+-- This allows storing history of AI-generated summaries, quotes, and actions
