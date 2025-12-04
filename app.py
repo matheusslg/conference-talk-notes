@@ -813,6 +813,14 @@ def get_talk_by_id(talk_id: str) -> dict:
     result = supabase.from_("talks").select("*").eq("id", talk_id).single().execute()
     return result.data
 
+def update_talk(talk_id: str, title: str, speaker: str = None) -> bool:
+    supabase.from_("talks").update({
+        "title": title,
+        "speaker": speaker,
+        "updated_at": "now()"
+    }).eq("id", talk_id).execute()
+    return True
+
 def delete_talk(talk_id: str) -> bool:
     supabase.from_("talks").delete().eq("id", talk_id).execute()
     return True
@@ -1794,6 +1802,23 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
     with tab6:
         st.markdown("### Manage Talk")
 
+        # Edit talk details
+        st.markdown("**Edit Talk Details**")
+        with st.form("edit_talk_form"):
+            edit_title = st.text_input("Title", value=talk["title"])
+            edit_speaker = st.text_input("Speaker", value=talk.get("speaker") or "")
+
+            if st.form_submit_button("Save Changes", type="primary", use_container_width=True, icon=":material/save:"):
+                if edit_title:
+                    update_talk(talk["id"], edit_title, edit_speaker or None)
+                    st.success("Talk updated")
+                    st.rerun()
+                else:
+                    st.warning("Title is required")
+
+        st.divider()
+
+        # Danger zone
         st.markdown('<div class="danger-zone">', unsafe_allow_html=True)
         st.markdown("**Delete this talk**")
         st.caption("This will permanently remove the talk and all associated content.")
