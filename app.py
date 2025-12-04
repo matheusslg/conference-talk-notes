@@ -1098,7 +1098,7 @@ Provide your response in markdown format."""
 
 # ============== Insights ==============
 
-def extract_key_quotes(talk_id: str, model: str = "gemini-2.5-flash") -> str:
+def extract_key_quotes(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
     """Extract memorable quotes, statistics, and key statements."""
     talk = get_talk_by_id(talk_id)
     chunks = get_talk_chunks(talk_id)
@@ -1137,13 +1137,15 @@ Output format:
 
 ## Memorable Insights
 - Insight 1
-- Insight 2"""
+- Insight 2{f'''
+
+**Additional user instructions:** {custom_instructions}''' if custom_instructions else ''}"""
 
     result = generate_with_llm(prompt, model)
     save_ai_content(talk_id, "quotes", result, model)
     return result
 
-def extract_action_items(talk_id: str, model: str = "gemini-2.5-flash") -> str:
+def extract_action_items(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
     """Extract action items, recommendations, and next steps."""
     talk = get_talk_by_id(talk_id)
     chunks = get_talk_chunks(talk_id)
@@ -1186,7 +1188,9 @@ Output format:
 
 ## Resources Mentioned
 - Link or resource 1
-- Link or resource 2"""
+- Link or resource 2{f'''
+
+**Additional user instructions:** {custom_instructions}''' if custom_instructions else ''}"""
 
     result = generate_with_llm(prompt, model)
     save_ai_content(talk_id, "actions", result, model)
@@ -1230,7 +1234,7 @@ def chat_with_talk(talk_id: str, question: str, chat_history: list, model: str =
 
 # ============== Summary & Export ==============
 
-def generate_talk_summary(talk_id: str, model: str = "gemini-2.5-flash") -> str:
+def generate_talk_summary(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
     talk = get_talk_by_id(talk_id)
     chunks = get_talk_chunks(talk_id)
 
@@ -1271,7 +1275,9 @@ Brief 2-3 paragraph overview of the talk
 ## Recommended Actions
 - What to do with this knowledge
 
-Be technical and specific. Use markdown formatting."""
+Be technical and specific. Use markdown formatting.{f'''
+
+**Additional user instructions:** {custom_instructions}''' if custom_instructions else ''}"""
 
     result = generate_with_llm(prompt, model)
 
@@ -1644,9 +1650,15 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
         if not chunks:
             st.info("Upload audio or slides first to generate a summary.")
         else:
+            summary_instructions = st.text_area(
+                "Custom instructions (optional)",
+                placeholder="e.g., Focus on serverless topics, keep it under 500 words...",
+                key="summary_instructions",
+                height=68
+            )
             if st.button(f"Generate Summary ({st.session_state.selected_model})", type="primary", use_container_width=True, icon=":material/auto_awesome:"):
                 with st.spinner("Generating comprehensive summary..."):
-                    generate_talk_summary(talk["id"], st.session_state.selected_model)
+                    generate_talk_summary(talk["id"], st.session_state.selected_model, summary_instructions or None)
                 st.rerun()
 
             # Load all saved summaries
@@ -1675,12 +1687,16 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
 
             # Key Quotes Section
             st.markdown("#### Key Quotes & Highlights")
-            col1, col2 = st.columns([3, 1])
-            with col2:
-                if st.button("Extract Quotes", use_container_width=True, icon=":material/format_quote:"):
-                    with st.spinner("Extracting key quotes..."):
-                        extract_key_quotes(talk["id"], st.session_state.selected_model)
-                    st.rerun()
+            quotes_instructions = st.text_area(
+                "Custom instructions (optional)",
+                placeholder="e.g., Focus on quotes about cost optimization...",
+                key="quotes_instructions",
+                height=68
+            )
+            if st.button("Extract Quotes", use_container_width=True, icon=":material/format_quote:"):
+                with st.spinner("Extracting key quotes..."):
+                    extract_key_quotes(talk["id"], st.session_state.selected_model, quotes_instructions or None)
+                st.rerun()
 
             saved_quotes = get_all_ai_content(talk["id"], "quotes")
             if saved_quotes:
@@ -1698,12 +1714,16 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
 
             # Action Items Section
             st.markdown("#### Action Items & Recommendations")
-            col1, col2 = st.columns([3, 1])
-            with col2:
-                if st.button("Extract Actions", use_container_width=True, icon=":material/checklist:"):
-                    with st.spinner("Extracting action items..."):
-                        extract_action_items(talk["id"], st.session_state.selected_model)
-                    st.rerun()
+            actions_instructions = st.text_area(
+                "Custom instructions (optional)",
+                placeholder="e.g., Focus on actions for a startup team...",
+                key="actions_instructions",
+                height=68
+            )
+            if st.button("Extract Actions", use_container_width=True, icon=":material/checklist:"):
+                with st.spinner("Extracting action items..."):
+                    extract_action_items(talk["id"], st.session_state.selected_model, actions_instructions or None)
+                st.rerun()
 
             saved_actions = get_all_ai_content(talk["id"], "actions")
             if saved_actions:
