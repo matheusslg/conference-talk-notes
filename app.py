@@ -1576,6 +1576,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                     if result["status"] == "success":
                         st.success(result['messages'][-1])
                         st.balloons()
+                        st.rerun()
                     else:
                         st.error(result['messages'][-1])
 
@@ -1612,6 +1613,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                     if result["status"] == "success":
                         st.success(result['messages'][-1])
                         st.balloons()
+                        st.rerun()
                     else:
                         st.error(result['messages'][-1])
 
