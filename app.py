@@ -924,6 +924,30 @@ def ingest_audio(file_path: str, file_name: str, talk_id: str, model: str, progr
 
 # ============== Image Ingestion ==============
 
+def extract_talk_info_from_slide(image: Image.Image) -> dict:
+    """Extract talk title and speaker from a title slide image."""
+    response = ai.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            image,
+            """This is a conference presentation title slide. Extract:
+1. The talk title (usually the largest text, may include session code like "SVS301")
+2. The speaker name(s)
+
+Output as JSON only, no markdown:
+{"title": "extracted title", "speaker": "speaker name or null if not found"}
+
+If you cannot identify a title, use: {"title": null, "speaker": null}"""
+        ]
+    )
+    try:
+        text = response.text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0]
+        return json.loads(text)
+    except:
+        return {"title": None, "speaker": None}
+
 def extract_slide_ocr(image: Image.Image) -> str:
     response = ai.models.generate_content(
         model="gemini-2.5-flash",
@@ -1350,22 +1374,60 @@ if st.session_state.active_view == "talks":
 
     # New Talk form in main content
     st.markdown("### Add New Talk")
-    with st.form("new_talk_form", clear_on_submit=True):
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            new_title = st.text_input("Talk Title", placeholder="SVS301 - Building Serverless Apps...")
-        with col2:
-            new_speaker = st.text_input("Speaker (optional)", placeholder="John Doe")
 
-        if st.form_submit_button("Create Talk", type="primary", use_container_width=True, icon=":material/add:"):
-            if new_title:
-                talk_id = create_talk(new_title, new_speaker or None)
-                if talk_id:
-                    st.session_state.selected_talk = talk_id
-                    st.session_state.active_view = "talk_detail"
-                    st.rerun()
-            else:
-                st.warning("Please enter a talk title")
+    create_method = st.radio("Create method", ["Manual", "From Title Slide"], horizontal=True, label_visibility="collapsed")
+
+    if create_method == "Manual":
+        with st.form("new_talk_form", clear_on_submit=True):
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                new_title = st.text_input("Talk Title", placeholder="SVS301 - Building Serverless Apps...")
+            with col2:
+                new_speaker = st.text_input("Speaker (optional)", placeholder="John Doe")
+
+            if st.form_submit_button("Create Talk", type="primary", use_container_width=True, icon=":material/add:"):
+                if new_title:
+                    talk_id = create_talk(new_title, new_speaker or None)
+                    if talk_id:
+                        st.session_state.selected_talk = talk_id
+                        st.session_state.active_view = "talk_detail"
+                        st.rerun()
+                else:
+                    st.warning("Please enter a talk title")
+    else:
+        # Create from title slide
+        title_slide = st.file_uploader(
+            "Upload title slide",
+            type=["png", "jpg", "jpeg", "webp", "heic", "heif"],
+            key="title_slide_uploader"
+        )
+
+        if title_slide:
+            img = Image.open(io.BytesIO(title_slide.getvalue()))
+            st.image(img, width=300)
+
+            if st.button("Extract Info", icon=":material/auto_awesome:", use_container_width=True):
+                with st.spinner("Analyzing slide..."):
+                    info = extract_talk_info_from_slide(img)
+                    st.session_state.extracted_title = info.get("title") or ""
+                    st.session_state.extracted_speaker = info.get("speaker") or ""
+                st.rerun()
+
+        if "extracted_title" in st.session_state:
+            with st.form("create_from_slide_form"):
+                extracted_title = st.text_input("Title", value=st.session_state.extracted_title)
+                extracted_speaker = st.text_input("Speaker", value=st.session_state.extracted_speaker)
+
+                if st.form_submit_button("Create Talk", type="primary", use_container_width=True, icon=":material/add:"):
+                    if extracted_title:
+                        talk_id = create_talk(extracted_title, extracted_speaker or None)
+                        del st.session_state.extracted_title
+                        del st.session_state.extracted_speaker
+                        st.session_state.selected_talk = talk_id
+                        st.session_state.active_view = "talk_detail"
+                        st.rerun()
+                    else:
+                        st.warning("Please enter a talk title")
 
     st.divider()
 
