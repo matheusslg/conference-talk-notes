@@ -19,10 +19,12 @@ create table if not exists talk_chunks (
   id uuid primary key default gen_random_uuid(),
   talk_id uuid references talks(id) on delete cascade,
   content text not null,
-  content_type text not null check (content_type in ('audio_transcript', 'slide_ocr', 'slide_vision')),
+  content_type text not null check (content_type in ('audio_transcript', 'slide_ocr', 'slide_vision', 'aligned_segment')),
   source_file text not null,
   chunk_index int default 0,
   slide_number int,  -- null for audio, 1-indexed for slides
+  start_time_seconds float,  -- relative timestamp from recording start
+  end_time_seconds float,    -- end timestamp for aligned segments
   embedding vector(768),  -- Gemini text-embedding-004 outputs 768 dimensions
   created_at timestamp with time zone default now()
 );
@@ -52,6 +54,8 @@ returns table (
   content_type text,
   source_file text,
   slide_number int,
+  start_time_seconds float,
+  end_time_seconds float,
   similarity float
 )
 language plpgsql
@@ -65,6 +69,8 @@ begin
     tc.content_type,
     tc.source_file,
     tc.slide_number,
+    tc.start_time_seconds,
+    tc.end_time_seconds,
     1 - (tc.embedding <=> query_embedding) as similarity
   from talk_chunks tc
   where 1 - (tc.embedding <=> query_embedding) > match_threshold
@@ -91,3 +97,13 @@ create index if not exists talk_ai_content_talk_id_idx on talk_ai_content(talk_i
 -- Migration: To support multiple AI generations per content type, run:
 -- DROP INDEX IF EXISTS talk_ai_content_unique_idx;
 -- This allows storing history of AI-generated summaries, quotes, and actions
+
+-- Migration: Add timestamp columns for aligned audio-slide segments
+-- ALTER TABLE talk_chunks ADD COLUMN start_time_seconds float;
+-- ALTER TABLE talk_chunks ADD COLUMN end_time_seconds float;
+-- ALTER TABLE talk_chunks DROP CONSTRAINT talk_chunks_content_type_check;
+-- ALTER TABLE talk_chunks ADD CONSTRAINT talk_chunks_content_type_check
+--   CHECK (content_type in ('audio_transcript', 'slide_ocr', 'slide_vision', 'aligned_segment'));
+
+-- Migration: Add slide thumbnail for Timeline preview
+-- ALTER TABLE talk_chunks ADD COLUMN slide_thumbnail text;

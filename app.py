@@ -4,11 +4,14 @@ from google import genai
 from openai import OpenAI
 import anthropic
 from PIL import Image
+from PIL.ExifTags import TAGS
 import pillow_heif
 import os
 import tempfile
 import io
 import json
+import base64
+from datetime import datetime
 
 # Register HEIF/HEIC support with Pillow
 pillow_heif.register_heif_opener()
@@ -18,6 +21,10 @@ st.set_page_config(
     page_title="Conference Talk Notes",
     layout="wide"
 )
+
+# Constants (defined early for use in login page)
+CURRENT_YEAR = datetime.now().year
+DEFAULT_EVENT = f"AWS re:Invent {CURRENT_YEAR}"
 
 # ============== Password Authentication ==============
 
@@ -34,7 +41,7 @@ def check_password():
         return True
 
     st.title("Conference Talk Notes")
-    st.caption("AWS re:Invent 2025")
+    st.caption(DEFAULT_EVENT)
     st.text_input("Password", type="password", on_change=password_entered, key="password")
     # Autofocus password field
     st.markdown('''
@@ -801,11 +808,23 @@ def get_all_talks() -> list:
     result = supabase.from_("talks").select("*").order("created_at", desc=True).execute()
     talks = result.data or []
 
-    # Enrich with chunk counts
+    # Enrich with segment count and first thumbnail
     for talk in talks:
-        chunks = supabase.from_("talk_chunks").select("content_type, slide_number").eq("talk_id", talk["id"]).execute()
-        talk["audio_count"] = len([c for c in (chunks.data or []) if c["content_type"] == "audio_transcript"])
-        talk["slide_count"] = len(set([c.get("slide_number") for c in (chunks.data or []) if c.get("slide_number")]))
+        chunks = supabase.from_("talk_chunks").select("content_type, slide_thumbnail, slide_number").eq("talk_id", talk["id"]).order("slide_number").execute()
+        chunk_data = chunks.data or []
+
+        # Count aligned segments (new format) or fall back to legacy counts
+        aligned = len([c for c in chunk_data if c["content_type"] == "aligned_segment"])
+        legacy = len([c for c in chunk_data if c["content_type"] in ("audio_transcript", "slide_ocr", "slide_vision")])
+        talk["segment_count"] = aligned or legacy
+
+        # Get first thumbnail
+        thumbnails = [c.get("slide_thumbnail") for c in chunk_data if c.get("slide_thumbnail")]
+        talk["first_thumbnail"] = thumbnails[0] if thumbnails else None
+
+        # Check if has summary (processed indicator)
+        ai_content = supabase.from_("talk_ai_content").select("content_type").eq("talk_id", talk["id"]).execute()
+        talk["has_summary"] = any(c["content_type"] == "summary" for c in (ai_content.data or []))
 
     return talks
 
@@ -824,6 +843,23 @@ def update_talk(talk_id: str, title: str, speaker: str = None) -> bool:
 def delete_talk(talk_id: str) -> bool:
     supabase.from_("talks").delete().eq("id", talk_id).execute()
     return True
+
+@st.dialog("Delete Talk")
+def delete_talk_dialog(talk_id: str, talk_title: str):
+    """Modal dialog for confirming talk deletion."""
+    st.warning(f"This will permanently delete **{talk_title}** and all associated content. This cannot be undone.")
+    st.markdown(f"Type **{talk_title}** to confirm:")
+    confirm_name = st.text_input("Talk name", key="dialog_confirm_delete_name", label_visibility="collapsed")
+
+    col_yes, col_no = st.columns(2)
+    with col_yes:
+        name_matches = confirm_name.strip() == talk_title
+        if st.button("Delete", type="primary", use_container_width=True, disabled=not name_matches, icon=":material/delete_forever:"):
+            delete_talk(talk_id)
+            st.rerun()
+    with col_no:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
 
 def get_talk_chunks(talk_id: str) -> list:
     result = supabase.from_("talk_chunks").select("*").eq("talk_id", talk_id).order("created_at").execute()
@@ -849,6 +885,335 @@ def get_uploaded_files(talk_id: str) -> dict:
                 files["slides"].append(filename)
 
     return files
+
+# ============== Aligned Audio-Slide Processing ==============
+
+def create_thumbnail_base64(image_bytes: bytes, max_size: int = 300) -> str:
+    """Create a small thumbnail and return as base64 string."""
+    import base64
+    img = Image.open(io.BytesIO(image_bytes))
+    img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=70)
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+def get_image_timestamp(image_bytes: bytes) -> datetime | None:
+    """Extract DateTimeOriginal from image EXIF data."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        exif = img._getexif()
+        if exif:
+            for tag_id, value in exif.items():
+                tag = TAGS.get(tag_id, tag_id)
+                if tag == "DateTimeOriginal":
+                    return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        pass
+    return None
+
+def transcribe_audio_with_timestamps(file_path: str) -> list[dict]:
+    """
+    Transcribe audio and return segments with timestamps.
+    Returns: [{"start": "00:01:30", "end": "00:02:45", "text": "..."}, ...]
+    """
+    uploaded_file = ai.files.upload(file=file_path)
+
+    # Wait for file to be processed
+    import time
+    while uploaded_file.state.name == "PROCESSING":
+        time.sleep(2)
+        uploaded_file = ai.files.get(name=uploaded_file.name)
+
+    prompt = """Transcribe this audio with timestamps.
+
+Output format (JSON array only, no markdown):
+[
+  {"start": "00:00:00", "end": "00:01:23", "text": "transcribed text here"},
+  {"start": "00:01:23", "end": "00:02:45", "text": "next segment"},
+  ...
+]
+
+Rules:
+- Create segments of roughly 30-60 seconds each, breaking at natural pauses
+- Include ALL spoken content
+- Timestamps in HH:MM:SS format
+- Output ONLY valid JSON array, no explanation or markdown"""
+
+    response = ai.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[uploaded_file, prompt]
+    )
+
+    text = response.text.strip()
+    # Clean up markdown if present
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+    return json.loads(text)
+
+def parse_timestamp_to_seconds(ts: str) -> float:
+    """Convert 'HH:MM:SS' or 'MM:SS' to seconds."""
+    parts = ts.split(":")
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    elif len(parts) == 2:
+        return int(parts[0]) * 60 + float(parts[1])
+    return float(parts[0])
+
+def format_seconds_to_timestamp(seconds: float) -> str:
+    """Convert seconds to HH:MM:SS format."""
+    if seconds is None:
+        return "??:??"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+def parse_aligned_content(content: str) -> dict:
+    """Parse the aligned segment content into sections."""
+    sections = {
+        'slide_text': '',
+        'visual_desc': '',
+        'audio': ''
+    }
+
+    current_section = None
+    lines = content.split('\n')
+
+    for line in lines:
+        if '### Slide Text' in line:
+            current_section = 'slide_text'
+        elif '### Visual Description' in line:
+            current_section = 'visual_desc'
+        elif '### Speaker Audio' in line:
+            current_section = 'audio'
+        elif current_section and line.strip() and not line.startswith('##'):
+            sections[current_section] += line + '\n'
+
+    # Clean up
+    for key in sections:
+        sections[key] = sections[key].strip()
+        if sections[key] == '[No text detected]':
+            sections[key] = ''
+        if sections[key] == '[No matching audio in this time range]':
+            sections[key] = '_No matching audio_'
+
+    return sections
+
+def match_audio_to_slide(audio_segments: list, slide_start: float, next_slide_time: float) -> str:
+    """Find audio segments that fall within this slide's time range."""
+    if slide_start is None:
+        return "[No timestamp - audio not aligned]"
+
+    matched = []
+    for seg in audio_segments:
+        seg_start = parse_timestamp_to_seconds(seg["start"])
+        seg_end = parse_timestamp_to_seconds(seg["end"])
+
+        # Segment overlaps with slide time range
+        if next_slide_time:
+            if seg_start < next_slide_time and seg_end > slide_start:
+                matched.append(seg["text"])
+        else:
+            # Last slide - include all remaining audio
+            if seg_start >= slide_start:
+                matched.append(seg["text"])
+
+    return " ".join(matched) if matched else "[No matching audio in this time range]"
+
+def process_talk_content(talk_id: str, audio_file=None, slide_files: list = None, progress_callback=None) -> dict:
+    """Process audio and/or slides. Handles audio-only, slides-only, or both together."""
+    results = {"status": "success", "messages": [], "segments": 0}
+
+    if not audio_file and not slide_files:
+        results["status"] = "error"
+        results["messages"].append("No content provided")
+        return results
+
+    try:
+        audio_segments = []
+        slides_with_time = []
+
+        # Process slides if provided
+        if slide_files:
+            if progress_callback:
+                progress_callback(0.05, "Extracting slide timestamps...")
+
+            for slide in slide_files:
+                img_bytes = slide.getvalue()
+                timestamp = get_image_timestamp(img_bytes)
+                slides_with_time.append({
+                    "file": slide,
+                    "bytes": img_bytes,
+                    "timestamp": timestamp,
+                    "name": slide.name
+                })
+
+            # Sort by timestamp (None timestamps go to end)
+            slides_with_time.sort(key=lambda x: x["timestamp"] or datetime.max)
+
+            # Get recording start time (first slide timestamp)
+            recording_start = slides_with_time[0]["timestamp"] if slides_with_time and slides_with_time[0]["timestamp"] else None
+
+            # Calculate relative timestamps for each slide
+            for slide in slides_with_time:
+                if slide["timestamp"] and recording_start:
+                    delta = slide["timestamp"] - recording_start
+                    slide["relative_seconds"] = delta.total_seconds()
+                else:
+                    slide["relative_seconds"] = None
+
+        # Transcribe audio if provided
+        if audio_file:
+            if progress_callback:
+                progress_callback(0.15, "Transcribing audio with timestamps...")
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file.name)[1]) as tmp:
+                tmp.write(audio_file.getvalue())
+                tmp_path = tmp.name
+
+            try:
+                audio_segments = transcribe_audio_with_timestamps(tmp_path)
+                results["messages"].append(f"Transcribed {len(audio_segments)} audio segments")
+            finally:
+                os.unlink(tmp_path)
+
+        # Case 1: Both audio and slides - create aligned segments
+        if audio_file and slide_files:
+            total_slides = len(slides_with_time)
+            for idx, slide in enumerate(slides_with_time):
+                if progress_callback:
+                    progress_callback(0.3 + (0.6 * idx / total_slides), f"Processing slide {idx + 1}/{total_slides}...")
+
+                img = Image.open(io.BytesIO(slide["bytes"]))
+                ocr_text = extract_slide_ocr(img)
+                vision_desc = describe_slide_vision(img)
+                thumbnail = create_thumbnail_base64(slide["bytes"])
+
+                next_slide_time = slides_with_time[idx + 1]["relative_seconds"] if idx + 1 < len(slides_with_time) else None
+
+                matched_audio = match_audio_to_slide(
+                    audio_segments,
+                    slide["relative_seconds"],
+                    next_slide_time
+                )
+
+                time_str = format_seconds_to_timestamp(slide["relative_seconds"])
+                aligned_content = f"""## Slide {idx + 1} [{time_str}]
+
+### Slide Text
+{ocr_text if ocr_text else "[No text detected]"}
+
+### Visual Description
+{vision_desc}
+
+### Speaker Audio
+{matched_audio}
+"""
+
+                embedding = generate_embedding(aligned_content)
+
+                supabase.from_("talk_chunks").insert({
+                    "talk_id": talk_id,
+                    "content": aligned_content,
+                    "content_type": "aligned_segment",
+                    "source_file": f"{audio_file.name}+{slide['name']}",
+                    "slide_number": idx + 1,
+                    "chunk_index": 0,
+                    "start_time_seconds": slide["relative_seconds"],
+                    "end_time_seconds": next_slide_time,
+                    "embedding": embedding,
+                    "slide_thumbnail": thumbnail
+                }).execute()
+
+                results["segments"] += 1
+
+        # Case 2: Audio only - create segments from transcription
+        elif audio_file and not slide_files:
+            total_segments = len(audio_segments)
+            for idx, seg in enumerate(audio_segments):
+                if progress_callback:
+                    progress_callback(0.3 + (0.6 * idx / total_segments), f"Processing segment {idx + 1}/{total_segments}...")
+
+                start_seconds = parse_timestamp_to_seconds(seg["start"])
+                end_seconds = parse_timestamp_to_seconds(seg["end"])
+                time_str = format_seconds_to_timestamp(start_seconds)
+
+                aligned_content = f"""## Segment {idx + 1} [{time_str}]
+
+### Speaker Audio
+{seg["text"]}
+"""
+
+                embedding = generate_embedding(aligned_content)
+
+                supabase.from_("talk_chunks").insert({
+                    "talk_id": talk_id,
+                    "content": aligned_content,
+                    "content_type": "aligned_segment",
+                    "source_file": audio_file.name,
+                    "slide_number": None,
+                    "chunk_index": idx,
+                    "start_time_seconds": start_seconds,
+                    "end_time_seconds": end_seconds,
+                    "embedding": embedding
+                }).execute()
+
+                results["segments"] += 1
+
+        # Case 3: Slides only - create segments from slides
+        elif slide_files and not audio_file:
+            total_slides = len(slides_with_time)
+            for idx, slide in enumerate(slides_with_time):
+                if progress_callback:
+                    progress_callback(0.3 + (0.6 * idx / total_slides), f"Processing slide {idx + 1}/{total_slides}...")
+
+                img = Image.open(io.BytesIO(slide["bytes"]))
+                ocr_text = extract_slide_ocr(img)
+                vision_desc = describe_slide_vision(img)
+                thumbnail = create_thumbnail_base64(slide["bytes"])
+
+                time_str = format_seconds_to_timestamp(slide["relative_seconds"])
+                next_slide_time = slides_with_time[idx + 1]["relative_seconds"] if idx + 1 < len(slides_with_time) else None
+
+                aligned_content = f"""## Slide {idx + 1} [{time_str}]
+
+### Slide Text
+{ocr_text if ocr_text else "[No text detected]"}
+
+### Visual Description
+{vision_desc}
+"""
+
+                embedding = generate_embedding(aligned_content)
+
+                supabase.from_("talk_chunks").insert({
+                    "talk_id": talk_id,
+                    "content": aligned_content,
+                    "content_type": "aligned_segment",
+                    "source_file": slide["name"],
+                    "slide_number": idx + 1,
+                    "chunk_index": 0,
+                    "start_time_seconds": slide["relative_seconds"],
+                    "end_time_seconds": next_slide_time,
+                    "embedding": embedding,
+                    "slide_thumbnail": thumbnail
+                }).execute()
+
+                results["segments"] += 1
+
+        if progress_callback:
+            progress_callback(1.0, "Processing complete!")
+
+        results["messages"].append(f"Created {results['segments']} aligned segments")
+
+    except Exception as e:
+        results["status"] = "error"
+        results["messages"].append(f"Error: {str(e)}")
+
+    return results
 
 # ============== Audio Ingestion ==============
 
@@ -1106,8 +1471,19 @@ def extract_key_quotes(talk_id: str, model: str = "gemini-2.5-flash", custom_ins
     if not chunks:
         return "No content available."
 
-    audio_text = " ".join([c['content'] for c in chunks if c['content_type'] == 'audio_transcript'])
-    slides_text = "\n".join([c['content'] for c in chunks if c['content_type'] == 'slide_ocr'])
+    # Check for aligned segments first
+    aligned_chunks = [c for c in chunks if c['content_type'] == 'aligned_segment']
+
+    if aligned_chunks:
+        aligned_content = "\n\n".join([
+            f"**[{format_seconds_to_timestamp(c.get('start_time_seconds'))}] Slide {c['slide_number']}:**\n{c['content']}"
+            for c in sorted(aligned_chunks, key=lambda x: x.get('start_time_seconds') or 0)
+        ])
+        content_text = aligned_content[:12000]
+    else:
+        audio_text = " ".join([c['content'] for c in chunks if c['content_type'] == 'audio_transcript'])
+        slides_text = "\n".join([c['content'] for c in chunks if c['content_type'] == 'slide_ocr'])
+        content_text = f"{audio_text[:8000]}\n\n{slides_text[:3000]}"
 
     prompt = f"""Extract the most memorable and impactful quotes, statistics, and key statements from this AWS re:Invent talk.
 
@@ -1115,9 +1491,7 @@ def extract_key_quotes(talk_id: str, model: str = "gemini-2.5-flash", custom_ins
 **Speaker:** {talk.get('speaker', 'Unknown')}
 
 **Content:**
-{audio_text[:8000]}
-
-{slides_text[:3000]}
+{content_text}
 
 **Instructions:**
 - Extract 5-10 of the most quotable statements
@@ -1153,8 +1527,19 @@ def extract_action_items(talk_id: str, model: str = "gemini-2.5-flash", custom_i
     if not chunks:
         return "No content available."
 
-    audio_text = " ".join([c['content'] for c in chunks if c['content_type'] == 'audio_transcript'])
-    slides_text = "\n".join([c['content'] for c in chunks if c['content_type'] == 'slide_ocr'])
+    # Check for aligned segments first
+    aligned_chunks = [c for c in chunks if c['content_type'] == 'aligned_segment']
+
+    if aligned_chunks:
+        aligned_content = "\n\n".join([
+            f"**[{format_seconds_to_timestamp(c.get('start_time_seconds'))}] Slide {c['slide_number']}:**\n{c['content']}"
+            for c in sorted(aligned_chunks, key=lambda x: x.get('start_time_seconds') or 0)
+        ])
+        content_text = aligned_content[:12000]
+    else:
+        audio_text = " ".join([c['content'] for c in chunks if c['content_type'] == 'audio_transcript'])
+        slides_text = "\n".join([c['content'] for c in chunks if c['content_type'] == 'slide_ocr'])
+        content_text = f"{audio_text[:8000]}\n\n{slides_text[:3000]}"
 
     prompt = f"""Extract all action items, recommendations, and next steps from this AWS re:Invent talk.
 
@@ -1162,9 +1547,7 @@ def extract_action_items(talk_id: str, model: str = "gemini-2.5-flash", custom_i
 **Speaker:** {talk.get('speaker', 'Unknown')}
 
 **Content:**
-{audio_text[:8000]}
-
-{slides_text[:3000]}
+{content_text}
 
 **Instructions:**
 - Identify explicit recommendations made by the speaker
@@ -1241,13 +1624,54 @@ def generate_talk_summary(talk_id: str, model: str = "gemini-2.5-flash", custom_
     if not chunks:
         return "No content available to summarize."
 
-    audio_text = " ".join([c['content'] for c in chunks if c['content_type'] == 'audio_transcript'])
-    slides_text = "\n\n".join([
-        f"Slide {c['slide_number']}: {c['content']}"
-        for c in chunks if c['content_type'] in ('slide_ocr', 'slide_vision')
-    ])
+    # Check for aligned segments first (preferred format)
+    aligned_chunks = [c for c in chunks if c['content_type'] == 'aligned_segment']
 
-    prompt = f"""Create a comprehensive summary of this AWS re:Invent talk.
+    if aligned_chunks:
+        # Use aligned content with timestamps
+        aligned_content = "\n\n".join([
+            f"**[{format_seconds_to_timestamp(c.get('start_time_seconds'))}] Slide {c['slide_number']}:**\n{c['content']}"
+            for c in sorted(aligned_chunks, key=lambda x: x.get('start_time_seconds') or 0)
+        ])
+
+        prompt = f"""Create a comprehensive summary of this AWS re:Invent talk.
+
+**Talk:** {talk['title']}
+**Speaker:** {talk.get('speaker', 'Unknown')}
+
+The content below is organized by slide with timestamps, showing what was on screen and what the speaker said at each moment:
+
+{aligned_content[:12000]}
+
+**Generate the following sections:**
+
+## Summary
+Brief 2-3 paragraph overview of the talk
+
+## Key Topics
+- Bullet points of main topics covered
+
+## AWS Services Mentioned
+- List any AWS services discussed
+
+## Key Takeaways
+- Main learnings and insights
+
+## Recommended Actions
+- What to do with this knowledge
+
+Be technical and specific. Use markdown formatting.{f'''
+
+**Additional user instructions:** {custom_instructions}''' if custom_instructions else ''}"""
+    else:
+        # Fallback to legacy separate audio/slides format
+        audio_text = " ".join([c['content'] for c in chunks if c['content_type'] == 'audio_transcript'])
+        slides_text = "\n\n".join([
+            f"Slide {c['slide_number']}: {c['content']}"
+            for c in chunks if c['content_type'] in ('slide_ocr', 'slide_vision')
+        ])
+
+        prompt = f"""Create a comprehensive summary of this AWS re:Invent talk.
 
 **Talk:** {talk['title']}
 **Speaker:** {talk.get('speaker', 'Unknown')}
@@ -1294,7 +1718,7 @@ def export_to_markdown(talk_id: str, include_transcript: bool = True) -> str:
     md = f"""# {talk['title']}
 
 **Speaker:** {talk.get('speaker', 'Unknown')}
-**Event:** {talk.get('event', 'AWS re:Invent 2025')}
+**Event:** {talk.get('event', DEFAULT_EVENT)}
 
 ---
 
@@ -1361,7 +1785,7 @@ available_models = get_available_models()
 # ============== Top Navigation ==============
 
 st.markdown("#### Conference Talk Notes")
-st.caption("AWS re:Invent 2025")
+st.caption(DEFAULT_EVENT)
 nav_cols = st.columns(3)
 with nav_cols[0]:
     if st.button("Talks", key="nav_talks", use_container_width=True, icon=":material/home:"):
@@ -1453,20 +1877,48 @@ if st.session_state.active_view == "talks":
         for idx, t in enumerate(talks):
             with cols[idx % 3]:
                 with st.container(border=True):
-                    st.markdown(f"**{t['title']}**")
-                    if t.get('speaker'):
-                        st.caption(f"Speaker: {t['speaker']}")
+                    # Thumbnail preview
+                    if t.get('first_thumbnail'):
+                        st.image(f"data:image/jpeg;base64,{t['first_thumbnail']}", use_container_width=True)
 
+                    # Title
+                    st.markdown(f"#### {t['title']}")
+
+                    # Event badge
+                    event_name = t.get('event') or DEFAULT_EVENT
+                    st.caption(f":material/event: {event_name}")
+
+                    # Speaker
+                    if t.get('speaker'):
+                        st.caption(f":material/person: {t['speaker']}")
+
+                    # Stats row
                     col_a, col_b = st.columns(2)
                     with col_a:
-                        st.metric("Audio", t.get('audio_count', 0))
+                        st.caption(f":material/segment: {t.get('segment_count', 0)} segments")
                     with col_b:
-                        st.metric("Slides", t.get('slide_count', 0))
+                        # Status indicator
+                        if t.get('has_summary'):
+                            st.caption(":material/check_circle: Processed")
+                        elif t.get('segment_count', 0) > 0:
+                            st.caption(":material/pending: Uploaded")
+                        else:
+                            st.caption(":material/hourglass_empty: Empty")
 
-                    if st.button("Open", key=f"open_{t['id']}", use_container_width=True, icon=":material/arrow_forward:"):
-                        st.session_state.selected_talk = t["id"]
-                        st.session_state.active_view = "talk_detail"
-                        st.rerun()
+                    # Created date
+                    created = t.get('created_at', '')[:10]
+                    st.caption(f":material/calendar_today: {created}")
+
+                    # Action buttons
+                    col_open, col_del = st.columns([3, 1])
+                    with col_open:
+                        if st.button("Open", key=f"open_{t['id']}", use_container_width=True, icon=":material/arrow_forward:"):
+                            st.session_state.selected_talk = t["id"]
+                            st.session_state.active_view = "talk_detail"
+                            st.rerun()
+                    with col_del:
+                        if st.button("", key=f"del_{t['id']}", icon=":material/delete:", help="Delete talk"):
+                            delete_talk_dialog(t["id"], t["title"])
 
 elif st.session_state.active_view == "search":
     st.title("Search All Talks")
@@ -1527,126 +1979,149 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
 
     # Stats
     chunks = get_talk_chunks(talk["id"])
-    audio_chunks = [c for c in chunks if c['content_type'] == 'audio_transcript']
-    slide_numbers = set([c['slide_number'] for c in chunks if c.get('slide_number')])
+    # Count segments
+    aligned_segments = [c for c in chunks if c.get('content_type') == 'aligned_segment']
+    legacy_chunks = [c for c in chunks if c.get('content_type') in ('audio_transcript', 'slide_ocr', 'slide_vision')]
+    segment_count = len(aligned_segments) or len(legacy_chunks)
+    total_chars = sum(len(c['content']) for c in chunks)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
-        st.metric("Audio Chunks", len(audio_chunks))
+        st.metric("Segments", segment_count)
     with col2:
-        st.metric("Slides", len(slide_numbers))
-    with col3:
-        total_chars = sum(len(c['content']) for c in chunks)
         st.metric("Total Characters", f"{total_chars:,}")
 
     st.divider()
 
     # Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([":material/upload: Upload", ":material/summarize: Summary", ":material/lightbulb: Insights", ":material/search: Search", ":material/download: Export", ":material/settings: Manage"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([":material/upload: Upload", ":material/timeline: Timeline", ":material/summarize: Summary", ":material/lightbulb: Insights", ":material/search: Search", ":material/download: Export", ":material/settings: Manage"])
 
     with tab1:
         st.markdown("### Upload Content")
-
-        upload_type = st.radio("Content Type", ["Audio Recording", "Slide Images"], horizontal=True)
-
-        if upload_type == "Audio Recording":
-            st.markdown('<div class="upload-container">', unsafe_allow_html=True)
-
-            uploaded_audio = st.file_uploader(
-                "Choose audio file",
-                type=["mp3", "mp4", "m4a", "wav", "webm", "mpeg", "mpga"],
-                help="Supported: MP3, MP4, M4A, WAV, WebM"
-            )
-
-            model = st.selectbox("Transcription Model", AVAILABLE_MODELS, index=0)
-
-            st.markdown('</div>', unsafe_allow_html=True)
-
-            if uploaded_audio:
-                if st.button("Transcribe Audio", type="primary", use_container_width=True, icon=":material/mic:"):
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_audio.name)[1]) as tmp:
-                        tmp.write(uploaded_audio.getvalue())
-                        tmp_path = tmp.name
-
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-
-                    def update_progress(p, msg):
-                        progress_bar.progress(p)
-                        status_text.text(msg)
-
-                    result = ingest_audio(tmp_path, uploaded_audio.name, talk["id"], model, update_progress)
-
-                    os.unlink(tmp_path)
-
-                    if result["status"] == "success":
-                        st.success(result['messages'][-1])
-                        st.balloons()
-                        st.rerun()
-                    else:
-                        st.error(result['messages'][-1])
-
-        else:  # Slide Images
-            st.markdown('<div class="upload-container">', unsafe_allow_html=True)
-
-            uploaded_images = st.file_uploader(
-                "Choose slide images",
-                type=["png", "jpg", "jpeg", "webp", "heic", "heif"],
-                accept_multiple_files=True,
-                help="Upload slides in order. Supported: PNG, JPG, WebP, HEIC"
-            )
-
-            st.markdown('</div>', unsafe_allow_html=True)
-
-            if uploaded_images:
-                st.markdown(f"**{len(uploaded_images)} slides selected**")
-
-                if st.button("Process Slides", type="primary", use_container_width=True, icon=":material/image:"):
-                    images_to_process = []
-                    for uf in uploaded_images:
-                        img = Image.open(io.BytesIO(uf.getvalue()))
-                        images_to_process.append((img, uf.name))
-
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-
-                    def update_progress(p, msg):
-                        progress_bar.progress(p)
-                        status_text.text(msg)
-
-                    result = ingest_images(images_to_process, talk["id"], update_progress)
-
-                    if result["status"] == "success":
-                        st.success(result['messages'][-1])
-                        st.balloons()
-                        st.rerun()
-                    else:
-                        st.error(result['messages'][-1])
-
-        # Previously uploaded files section
-        st.divider()
-        st.markdown("### Previously Uploaded")
-
-        uploaded_files = get_uploaded_files(talk["id"])
+        st.caption("Upload audio, slides, or both together. If both have timestamps, they'll be aligned automatically.")
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**Audio Files**")
-            if uploaded_files["audio"]:
-                for f in uploaded_files["audio"]:
-                    st.caption(f":material/mic: {f}")
-            else:
-                st.caption("No audio files uploaded")
-
+            upload_audio = st.file_uploader(
+                "Audio Recording (optional)",
+                type=["mp3", "mp4", "m4a", "wav", "webm"],
+                key="upload_audio"
+            )
         with col2:
-            st.markdown("**Slide Images**")
-            if uploaded_files["slides"]:
-                for f in uploaded_files["slides"]:
-                    st.caption(f":material/image: {f}")
-            else:
-                st.caption("No slides uploaded")
+            upload_slides = st.file_uploader(
+                "Slide Photos (optional)",
+                type=["png", "jpg", "jpeg", "webp", "heic", "heif"],
+                accept_multiple_files=True,
+                key="upload_slides",
+                help="Photos with EXIF timestamps will be sorted and aligned"
+            )
+
+        # Show what will be processed
+        if upload_audio or upload_slides:
+            status_parts = []
+            if upload_audio:
+                status_parts.append(f"1 audio file")
+            if upload_slides:
+                status_parts.append(f"{len(upload_slides)} slides")
+            st.markdown(f"**Ready to process:** {' + '.join(status_parts)}")
+
+            if st.button("Process Content", type="primary", use_container_width=True, icon=":material/auto_awesome:"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def update_progress(p, msg):
+                    progress_bar.progress(p)
+                    status_text.text(msg)
+
+                result = process_talk_content(
+                    talk["id"],
+                    audio_file=upload_audio,
+                    slide_files=upload_slides if upload_slides else None,
+                    progress_callback=update_progress
+                )
+
+                if result["status"] == "success":
+                    st.success(result['messages'][-1])
+                    st.balloons()
+                    st.rerun()
+                else:
+                    st.error(result['messages'][-1])
+
+        # Previously uploaded content section
+        st.divider()
+        st.markdown("### Processed Content")
+
+        aligned_count = len([c for c in chunks if c.get('content_type') == 'aligned_segment'])
+        if aligned_count > 0:
+            st.caption(f":material/check_circle: {aligned_count} segments processed")
+        else:
+            st.caption("No content processed yet")
 
     with tab2:
+        st.markdown("### Talk Timeline")
+
+        # Get aligned segments
+        aligned_chunks = [c for c in chunks if c.get('content_type') == 'aligned_segment']
+
+        if not aligned_chunks:
+            # Check for legacy content
+            if chunks:
+                st.info("This talk was processed without timestamp alignment. Re-upload using 'Aligned (Audio + Slides)' for timeline view.")
+            else:
+                st.info("Upload content using 'Aligned (Audio + Slides)' to see the timeline.")
+        else:
+            # Sort by timestamp
+            sorted_chunks = sorted(aligned_chunks, key=lambda x: x.get('start_time_seconds') or 0)
+
+            # Calculate total duration
+            last_chunk = sorted_chunks[-1]
+            total_duration = last_chunk.get('end_time_seconds') or last_chunk.get('start_time_seconds') or 0
+
+            st.caption(f"Total duration: {format_seconds_to_timestamp(total_duration)} | {len(sorted_chunks)} segments")
+
+            # Display each segment
+            for chunk in sorted_chunks:
+                start_time = chunk.get('start_time_seconds')
+                thumbnail = chunk.get('slide_thumbnail')
+
+                # Create timeline entry
+                with st.container(border=True):
+                    # Layout: thumbnail on left, content on right
+                    if thumbnail:
+                        col_img, col_content = st.columns([1, 3])
+                        with col_img:
+                            timestamp_str = format_seconds_to_timestamp(start_time) if start_time is not None else "??:??"
+                            st.caption(f"**{timestamp_str}** — Slide {chunk.get('slide_number', '?')}")
+                            st.image(f"data:image/jpeg;base64,{thumbnail}", use_container_width=True)
+                    else:
+                        col_content = st.container()
+                        timestamp_str = format_seconds_to_timestamp(start_time) if start_time is not None else "??:??"
+                        st.caption(f"**{timestamp_str}** — Segment {chunk.get('chunk_index', '?') + 1}")
+
+                    with col_content:
+                        # Parse and display content sections
+                        sections = parse_aligned_content(chunk['content'])
+
+                        # Slide text
+                        if sections.get('slide_text'):
+                            st.markdown("**Slide Text**")
+                            st.markdown(sections['slide_text'])
+
+                        # Visual description (collapsed by default)
+                        if sections.get('visual_desc'):
+                            with st.expander("Visual Description"):
+                                st.markdown(sections['visual_desc'])
+
+                        # Audio transcription (expandable)
+                        if sections.get('audio'):
+                            with st.expander("Speaker Said"):
+                                st.markdown(sections['audio'])
+
+                    # Warning if no timestamp
+                    if start_time is None:
+                        st.warning("No timestamp available - this slide was not aligned")
+
+    with tab3:
         if not chunks:
             st.info("Upload audio or slides first to generate a summary.")
         else:
@@ -1674,7 +2149,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                             delete_ai_content(item['id'])
                             st.rerun()
 
-    with tab3:
+    with tab4:
         st.markdown("### Talk Insights")
 
         if not chunks:
@@ -1777,7 +2252,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                     save_chat_history(talk["id"], [], st.session_state.selected_model)
                     st.rerun()
 
-    with tab4:
+    with tab5:
         st.markdown("### Search This Talk")
 
         talk_query = st.text_input("Search query", placeholder="Search within this talk...", key="talk_search", label_visibility="collapsed")
@@ -1801,7 +2276,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             else:
                 st.warning("No matches found in this talk.")
 
-    with tab5:
+    with tab6:
         st.markdown("### Export to Markdown")
 
         include_transcript = st.checkbox("Include full transcript", value=True)
@@ -1821,7 +2296,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             with st.expander("Preview"):
                 st.markdown(md_content)
 
-    with tab6:
+    with tab7:
         st.markdown("### Manage Talk")
 
         # Edit talk details
@@ -1845,13 +2320,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
         st.markdown("**Delete this talk**")
         st.caption("This will permanently remove the talk and all associated content.")
 
-        confirm = st.checkbox(f"I understand this will delete '{talk['title']}'")
-
-        if st.button("Delete Talk", type="secondary", disabled=not confirm, icon=":material/delete_forever:"):
-            delete_talk(talk["id"])
-            st.success("Talk deleted")
-            st.session_state.active_view = "talks"
-            st.session_state.selected_talk = None
-            st.rerun()
+        if st.button("Delete Talk", type="secondary", icon=":material/delete_forever:"):
+            delete_talk_dialog(talk["id"], talk["title"])
 
         st.markdown('</div>', unsafe_allow_html=True)
