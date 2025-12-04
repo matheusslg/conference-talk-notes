@@ -1775,6 +1775,8 @@ if "selected_model" not in st.session_state:
     st.session_state.selected_model = "gemini-2.5-flash"
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "chat_talk_id" not in st.session_state:
+    st.session_state.chat_talk_id = None
 
 # Get talks
 talks = get_all_talks()
@@ -2155,10 +2157,11 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
         if not chunks:
             st.info("Upload audio or slides first to generate insights.")
         else:
-            # Load saved chat history
-            saved_chat = get_chat_history(talk["id"])
-            if saved_chat and not st.session_state.chat_history:
-                st.session_state.chat_history = saved_chat
+            # Load saved chat history (reset if switching talks)
+            if st.session_state.chat_talk_id != talk["id"]:
+                st.session_state.chat_talk_id = talk["id"]
+                saved_chat = get_chat_history(talk["id"])
+                st.session_state.chat_history = saved_chat if saved_chat else []
 
             # Key Quotes Section
             st.markdown("#### Key Quotes & Highlights")
