@@ -118,5 +118,14 @@ create index if not exists talk_ai_content_talk_id_idx on talk_ai_content(talk_i
 -- Stores URLs to original slide images in Supabase Storage
 -- ALTER TABLE talks ADD COLUMN slide_urls jsonb DEFAULT '[]';
 
+-- Migration: slide_urls format changed from array of strings to array of objects
+-- Old format: ["https://storage.../slide_001.jpg", "https://storage.../slide_002.jpg"]
+-- New format: [{"url": "https://...", "filename": "IMG_1234.jpg", "taken_at": "2025-01-01T11:02:15+00:00"}, ...]
+-- This stores original filename and EXIF timestamp for chronological context in multimodal prompts
+-- No schema change needed - jsonb column handles both formats (backwards compatible)
+
 -- Storage bucket: talk-slides
 -- Create in Supabase dashboard: Storage > New bucket > "talk-slides" (public access)
+
+-- Migration: Add author_name for talk attribution
+-- ALTER TABLE talks ADD COLUMN author_name text;

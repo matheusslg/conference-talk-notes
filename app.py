@@ -66,7 +66,7 @@ if not check_password():
     st.stop()
 
 # Constants
-SUPPORTED_AUDIO_FORMATS = [".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm"]
+SUPPORTED_AUDIO_FORMATS = [".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".qta"]
 SUPPORTED_IMAGE_FORMATS = [".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"]
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
@@ -834,10 +834,11 @@ def save_chat_history(talk_id: str, history: list, model: str):
 
 # ============== Talk Management ==============
 
-def create_talk(title: str, speaker: str = None) -> str:
+def create_talk(title: str, speaker: str = None, author_name: str = None) -> str:
     result = supabase.from_("talks").insert({
         "title": title,
         "speaker": speaker,
+        "author_name": author_name,
     }).execute()
     return result.data[0]["id"] if result.data else None
 
@@ -869,10 +870,11 @@ def get_talk_by_id(talk_id: str) -> dict:
     result = supabase.from_("talks").select("*").eq("id", talk_id).single().execute()
     return result.data
 
-def update_talk(talk_id: str, title: str, speaker: str = None) -> bool:
+def update_talk(talk_id: str, title: str, speaker: str = None, author_name: str = None) -> bool:
     supabase.from_("talks").update({
         "title": title,
         "speaker": speaker,
+        "author_name": author_name,
         "updated_at": "now()"
     }).eq("id", talk_id).execute()
     return True
@@ -900,6 +902,13 @@ def delete_talk_dialog(talk_id: str, talk_title: str):
 
 def get_talk_chunks(talk_id: str) -> list:
     result = supabase.from_("talk_chunks").select("*").eq("talk_id", talk_id).order("created_at").execute()
+    return result.data or []
+
+def get_aligned_segments(talk_id: str) -> list:
+    """Get aligned segments with slide numbers and timestamps, ordered by slide number."""
+    result = supabase.from_("talk_chunks").select(
+        "slide_number, start_time_seconds, end_time_seconds, content"
+    ).eq("talk_id", talk_id).eq("content_type", "aligned_segment").order("slide_number").execute()
     return result.data or []
 
 def get_uploaded_files(talk_id: str) -> dict:
@@ -1001,7 +1010,7 @@ def get_audio_creation_time(file_path: str) -> datetime | None:
         return None
 
 
-def transcribe_audio_with_timestamps(file_path: str) -> list[dict]:
+def transcribe_audio_with_timestamps(file_path: str, model: str = "gemini-2.5-pro") -> list[dict]:
     """
     Transcribe audio and return segments with timestamps.
     Returns: [{"start": "00:01:30", "end": "00:02:45", "text": "..."}, ...]
@@ -1029,8 +1038,9 @@ Rules:
 - Timestamps in HH:MM:SS format
 - Output ONLY valid JSON array, no explanation or markdown"""
 
+    gemini_model = get_gemini_model_for_multimodal(model)
     response = ai.models.generate_content(
-        model="gemini-2.5-flash",
+        model=gemini_model,
         contents=[uploaded_file, prompt]
     )
 
@@ -1062,9 +1072,68 @@ def format_seconds_to_timestamp(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
+def format_datetime_for_prompt(dt_input) -> str:
+    """Format datetime to user-friendly string for multimodal prompts.
+
+    Accepts ISO string or datetime object.
+    Returns: 'YYYY-MM-DD HH:MM:SS' format.
+    """
+    if dt_input is None:
+        return None
+    try:
+        if isinstance(dt_input, str):
+            dt = datetime.fromisoformat(dt_input.replace('Z', '+00:00'))
+        else:
+            dt = dt_input
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(dt_input) if dt_input else None
+
+def build_slide_timing_context(talk_id: str, audio_start_timestamp: str = None) -> str:
+    """Build a timing context string for multimodal prompts.
+
+    Returns a formatted string showing when each slide appears in the recording,
+    with both relative timestamps (MM:SS) and real-world times if available.
+    """
+    segments = get_aligned_segments(talk_id)
+    if not segments:
+        return ""
+
+    # Parse audio start time if available
+    audio_start = None
+    if audio_start_timestamp:
+        try:
+            audio_start = datetime.fromisoformat(audio_start_timestamp.replace('Z', '+00:00'))
+        except:
+            pass
+
+    lines = ["**Slide Timeline:**"]
+    for seg in segments:
+        slide_num = seg.get('slide_number', 0)
+        start_sec = seg.get('start_time_seconds')
+        end_sec = seg.get('end_time_seconds')
+
+        if start_sec is None:
+            continue
+
+        # Format relative timestamp
+        rel_start = format_seconds_to_timestamp(start_sec)
+        rel_end = format_seconds_to_timestamp(end_sec) if end_sec else "end"
+
+        # Calculate real-world time if audio_start is available
+        if audio_start:
+            real_start = audio_start + timedelta(seconds=start_sec)
+            real_time_str = real_start.strftime("%H:%M:%S")
+            lines.append(f"- Slide {slide_num}: {rel_start} - {rel_end} (real time: {real_time_str})")
+        else:
+            lines.append(f"- Slide {slide_num}: {rel_start} - {rel_end}")
+
+    return "\n".join(lines)
+
+
 # ============== Step-by-Step Processing Functions ==============
 
-def step_transcribe_audio(audio_bytes: bytes, audio_name: str) -> dict:
+def step_transcribe_audio(audio_bytes: bytes, audio_name: str, model: str = "gemini-2.5-pro") -> dict:
     """Step 1: Transcribe audio using Gemini.
 
     Returns dict with:
@@ -1081,7 +1150,7 @@ def step_transcribe_audio(audio_bytes: bytes, audio_name: str) -> dict:
 
     try:
         # Transcribe using existing function
-        segments = transcribe_audio_with_timestamps(tmp_path)
+        segments = transcribe_audio_with_timestamps(tmp_path, model)
         result["segments"] = segments
         result["messages"].append(f"Transcribed {len(segments)} segments")
 
@@ -1200,7 +1269,8 @@ def step_align_slides_to_audio(
     slides_with_time: list,
     audio_segments: list,
     audio_start_time,
-    use_exif: bool
+    use_exif: bool,
+    model: str = "gemini-2.5-pro"
 ) -> dict:
     """Step 3: Align slides to audio segments.
 
@@ -1265,8 +1335,8 @@ def step_align_slides_to_audio(
         processed_slides = []
         for idx, slide in enumerate(slides_with_time):
             img = Image.open(io.BytesIO(slide["bytes"]))
-            ocr_text = extract_slide_ocr(img)
-            vision_desc = describe_slide_vision(img)
+            ocr_text = extract_slide_ocr(img, model)
+            vision_desc = describe_slide_vision(img, model)
             thumbnail = create_thumbnail_base64(slide["bytes"])
 
             processed_slides.append({
@@ -1279,7 +1349,7 @@ def step_align_slides_to_audio(
 
         # Run AI alignment
         try:
-            alignments = align_slides_with_ai(audio_segments, processed_slides)
+            alignments = align_slides_with_ai(audio_segments, processed_slides, model)
             result["messages"].append("AI alignment successful")
         except Exception as align_error:
             result["messages"].append(f"AI alignment failed, using sequential fallback: {str(align_error)}")
@@ -1656,7 +1726,12 @@ def step_process_multimodal(
             )
 
             url = supabase.storage.from_("talk-slides").get_public_url(slide_filename)
-            slide_urls.append(url)
+            # Store metadata alongside URL for multimodal prompts
+            slide_urls.append({
+                "url": url,
+                "filename": slide["name"],
+                "taken_at": slide["timestamp"].isoformat() if slide["timestamp"] else None
+            })
 
         # Store slide URLs in talk record
         supabase.from_("talks").update({"slide_urls": slide_urls}).eq("id", talk_id).execute()
@@ -1813,7 +1888,7 @@ def match_audio_to_slide(audio_segments: list, slide_start: float, next_slide_ti
 
     return format_timestamped_segments(matched_segments)
 
-def align_slides_with_ai(audio_segments: list, slides_data: list) -> list:
+def align_slides_with_ai(audio_segments: list, slides_data: list, model: str = "gemini-2.5-pro") -> list:
     """
     Use Gemini to semantically align slides with transcript segments.
     Returns list of alignment results with matched audio text and timestamps.
@@ -1844,8 +1919,9 @@ def align_slides_with_ai(audio_segments: list, slides_data: list) -> list:
         slides_json=json.dumps(slides_for_prompt, indent=2)
     )
 
+    gemini_model = get_gemini_model_for_multimodal(model)
     response = ai.models.generate_content(
-        model="gemini-2.5-flash",
+        model=gemini_model,
         contents=prompt
     )
 
@@ -1935,7 +2011,7 @@ def fallback_sequential_alignment(audio_segments: list, num_slides: int) -> list
 
     return results
 
-def process_talk_content(talk_id: str, audio_file=None, slide_files: list = None, progress_callback=None) -> dict:
+def process_talk_content(talk_id: str, audio_file=None, slide_files: list = None, progress_callback=None, model: str = "gemini-2.5-pro") -> dict:
     """Process audio and/or slides. Handles audio-only, slides-only, or both together."""
     results = {"status": "success", "messages": [], "segments": 0}
 
@@ -2009,7 +2085,7 @@ def process_talk_content(talk_id: str, audio_file=None, slide_files: list = None
                     results["messages"].append("No audio creation time found in metadata - will use first slide as reference")
 
                 # Transcribe the audio
-                audio_segments = transcribe_audio_with_timestamps(tmp_path)
+                audio_segments = transcribe_audio_with_timestamps(tmp_path, model)
                 results["messages"].append(f"Transcribed {len(audio_segments)} audio segments")
 
                 # Upload audio to Supabase Storage for playback
@@ -2124,8 +2200,8 @@ def process_talk_content(talk_id: str, audio_file=None, slide_files: list = None
                         progress_callback(0.3 + (0.2 * idx / total_slides), f"Processing slide {idx + 1}/{total_slides}...")
 
                     img = Image.open(io.BytesIO(slide["bytes"]))
-                    ocr_text = extract_slide_ocr(img)
-                    vision_desc = describe_slide_vision(img)
+                    ocr_text = extract_slide_ocr(img, model)
+                    vision_desc = describe_slide_vision(img, model)
                     thumbnail = create_thumbnail_base64(slide["bytes"])
 
                     processed_slides.append({
@@ -2140,7 +2216,7 @@ def process_talk_content(talk_id: str, audio_file=None, slide_files: list = None
                     progress_callback(0.55, "Aligning slides to audio with AI...")
 
                 try:
-                    alignments = align_slides_with_ai(audio_segments, processed_slides)
+                    alignments = align_slides_with_ai(audio_segments, processed_slides, model)
                     results["messages"].append("Used AI-based alignment (no EXIF timestamps found)")
                 except Exception as align_error:
                     results["messages"].append(f"AI alignment failed, using sequential fallback: {str(align_error)}")
@@ -2350,10 +2426,11 @@ def ingest_audio(file_path: str, file_name: str, talk_id: str, model: str, progr
 
 # ============== Image Ingestion ==============
 
-def extract_talk_info_from_slide(image: Image.Image) -> dict:
+def extract_talk_info_from_slide(image: Image.Image, model: str = "gemini-2.5-pro") -> dict:
     """Extract talk title and speaker from a title slide image."""
+    gemini_model = get_gemini_model_for_multimodal(model)
     response = ai.models.generate_content(
-        model="gemini-2.5-flash",
+        model=gemini_model,
         contents=[
             image,
             """This is a conference presentation title slide. Extract:
@@ -2374,9 +2451,10 @@ If you cannot identify a title, use: {"title": null, "speaker": null}"""
     except:
         return {"title": None, "speaker": None}
 
-def extract_slide_ocr(image: Image.Image) -> str:
+def extract_slide_ocr(image: Image.Image, model: str = "gemini-2.5-pro") -> str:
+    gemini_model = get_gemini_model_for_multimodal(model)
     response = ai.models.generate_content(
-        model="gemini-2.5-flash",
+        model=gemini_model,
         contents=[
             image,
             """Extract ALL text visible in this slide image.
@@ -2388,9 +2466,10 @@ If no text is visible, output 'NO_TEXT_FOUND'."""
     text = response.text or ""
     return "" if text.strip() == "NO_TEXT_FOUND" else text
 
-def describe_slide_vision(image: Image.Image) -> str:
+def describe_slide_vision(image: Image.Image, model: str = "gemini-2.5-pro") -> str:
+    gemini_model = get_gemini_model_for_multimodal(model)
     response = ai.models.generate_content(
-        model="gemini-2.5-flash",
+        model=gemini_model,
         contents=[
             image,
             """Describe the visual elements of this presentation slide:
@@ -2477,7 +2556,7 @@ def search_talk_content(query: str, talk_id: str = None, content_types: list = N
     result = supabase.rpc("search_talk_chunks", params).execute()
     return result.data or []
 
-def generate_search_insights(query: str, results: list) -> str:
+def generate_search_insights(query: str, results: list, model: str = "gemini-2.5-pro") -> str:
     if not results:
         return ""
 
@@ -2495,8 +2574,9 @@ def generate_search_insights(query: str, results: list) -> str:
 
     context = "\n\n---\n\n".join(context_parts)
 
+    gemini_model = get_gemini_model_for_multimodal(model)
     response = ai.models.generate_content(
-        model="gemini-2.5-flash",
+        model=gemini_model,
         contents=f"""Based on the user's question and the relevant content from conference talk materials below, provide a comprehensive answer.
 
 **User's Question:** {query}
@@ -2516,7 +2596,7 @@ Provide your response in markdown format."""
 
 # ============== Insights ==============
 
-def extract_key_quotes(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
+def extract_key_quotes(talk_id: str, model: str = "gemini-2.5-pro", custom_instructions: str = None) -> str:
     """Extract memorable quotes, statistics, and key statements."""
     talk = get_talk_by_id(talk_id)
     chunks = get_talk_chunks(talk_id)
@@ -2572,7 +2652,7 @@ Output format:
     save_ai_content(talk_id, "quotes", result, model)
     return result
 
-def extract_action_items(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
+def extract_action_items(talk_id: str, model: str = "gemini-2.5-pro", custom_instructions: str = None) -> str:
     """Extract action items, recommendations, and next steps."""
     talk = get_talk_by_id(talk_id)
     chunks = get_talk_chunks(talk_id)
@@ -2632,7 +2712,7 @@ Output format:
     save_ai_content(talk_id, "actions", result, model)
     return result
 
-def chat_with_talk(talk_id: str, question: str, chat_history: list, model: str = "gemini-2.5-flash") -> str:
+def chat_with_talk(talk_id: str, question: str, chat_history: list, model: str = "gemini-2.5-pro") -> str:
     """Answer questions about this specific talk using RAG."""
     # Search for relevant context
     results = search_talk_content(question, talk_id=talk_id, match_count=5)
@@ -2670,7 +2750,7 @@ def chat_with_talk(talk_id: str, question: str, chat_history: list, model: str =
 
 # ============== Summary & Export ==============
 
-def generate_talk_summary(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
+def generate_talk_summary(talk_id: str, model: str = "gemini-2.5-pro", custom_instructions: str = None) -> str:
     talk = get_talk_by_id(talk_id)
     chunks = get_talk_chunks(talk_id)
 
@@ -2798,7 +2878,7 @@ def upload_audio_to_gemini_for_summary(audio_bytes: bytes, audio_name: str):
         os.unlink(tmp_path)
 
 
-def generate_talk_summary_multimodal(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
+def generate_talk_summary_multimodal(talk_id: str, model: str = "gemini-2.5-pro", custom_instructions: str = None) -> str:
     """Generate summary using audio + slides via Gemini multimodal API.
 
     If multimodal content (audio_url + slide_urls) is available, sends everything
@@ -2821,18 +2901,34 @@ def generate_talk_summary_multimodal(talk_id: str, model: str = "gemini-2.5-flas
         # Upload audio to Gemini
         gemini_audio = upload_audio_to_gemini_for_summary(audio_bytes, f"{talk_id}_summary.mp3")
 
-        # Fetch slide images
-        slide_images = [fetch_from_storage(url) for url in slide_urls]
+        # Normalize slide_urls to list of dicts (backwards compatibility)
+        slide_metadata = []
+        for slide_entry in slide_urls:
+            if isinstance(slide_entry, dict):
+                slide_metadata.append(slide_entry)
+            else:
+                # Old format: just a URL string
+                slide_metadata.append({"url": slide_entry, "filename": None, "taken_at": None})
 
-        # Build prompt
+        # Fetch slide images
+        slide_images = [fetch_from_storage(sm["url"]) for sm in slide_metadata]
+
+        # Build slide timing context from aligned segments
+        timing_context = build_slide_timing_context(talk_id, talk.get('audio_start_timestamp'))
+
+        # Build prompt with timing information
         prompt = f"""You are analyzing a complete conference presentation. You have:
 1. The FULL audio recording of the speaker
 2. Photos of ALL slides shown during the talk
+3. Precise timing information showing when each slide was discussed
 
 **Talk:** {talk['title']}
 **Speaker:** {talk.get('speaker', 'Unknown')}
 **Event:** {talk.get('event', 'Unknown')}
-
+{f'''
+{timing_context}
+''' if timing_context else ''}
+Use the slide timing information to understand the structure and flow of the talk.
 Listen to the ENTIRE audio recording and look at ALL slides to create a comprehensive summary.
 
 **Generate the following sections:**
@@ -2841,7 +2937,7 @@ Listen to the ENTIRE audio recording and look at ALL slides to create a comprehe
 A comprehensive 2-3 paragraph overview of the entire talk
 
 ## Key Topics
-- Bullet points of main topics covered
+- Bullet points of main topics covered (reference specific slides and timestamps when relevant)
 
 ## AWS Services Mentioned
 - List ALL AWS services discussed with brief context
@@ -2857,11 +2953,33 @@ Use markdown formatting.{f'''
 
 **Additional user instructions:** {custom_instructions}''' if custom_instructions else ''}"""
 
-        # Build multimodal contents
-        contents = [gemini_audio]
+        # Build multimodal contents with chronological context
+        contents = []
+
+        # Add audio start timestamp context
+        audio_start_ts = talk.get('audio_start_timestamp')
+        if audio_start_ts:
+            formatted_start = format_datetime_for_prompt(audio_start_ts)
+            if formatted_start:
+                contents.append(f"[Audio recording started at {formatted_start}]")
+
+        # Add audio file
+        contents.append(gemini_audio)
+
+        # Add slides with photo metadata (filename, taken_at) for chronological context
         for i, img_bytes in enumerate(slide_images):
-            contents.append(f"[Slide {i+1}]")
+            slide_num = i + 1
+            meta = slide_metadata[i]
+            filename = meta.get("filename") or f"slide_{slide_num}"
+            taken_at = meta.get("taken_at")
+
+            if taken_at:
+                formatted_taken = format_datetime_for_prompt(taken_at)
+                contents.append(f'[Photo {slide_num} "{filename}" taken at {formatted_taken}]')
+            else:
+                contents.append(f'[Photo {slide_num} "{filename}"]')
             contents.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+
         contents.append(prompt)
 
         # Execute multimodal request
@@ -2884,7 +3002,7 @@ Use markdown formatting.{f'''
         return generate_talk_summary(talk_id, model, custom_instructions)
 
 
-def extract_key_quotes_multimodal(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
+def extract_key_quotes_multimodal(talk_id: str, model: str = "gemini-2.5-pro", custom_instructions: str = None) -> str:
     """Extract key quotes using audio + slides via Gemini multimodal API."""
     talk = get_talk_by_id(talk_id)
 
@@ -2897,35 +3015,72 @@ def extract_key_quotes_multimodal(talk_id: str, model: str = "gemini-2.5-flash",
     try:
         audio_bytes = fetch_from_storage(audio_url)
         gemini_audio = upload_audio_to_gemini_for_summary(audio_bytes, f"{talk_id}_quotes.mp3")
-        slide_images = [fetch_from_storage(url) for url in slide_urls]
+
+        # Normalize slide_urls to list of dicts (backwards compatibility)
+        slide_metadata = []
+        for slide_entry in slide_urls:
+            if isinstance(slide_entry, dict):
+                slide_metadata.append(slide_entry)
+            else:
+                slide_metadata.append({"url": slide_entry, "filename": None, "taken_at": None})
+
+        slide_images = [fetch_from_storage(sm["url"]) for sm in slide_metadata]
+
+        # Build slide timing context
+        timing_context = build_slide_timing_context(talk_id, talk.get('audio_start_timestamp'))
 
         prompt = f"""You are analyzing a conference presentation to extract memorable quotes.
 
 **Talk:** {talk['title']}
 **Speaker:** {talk.get('speaker', 'Unknown')}
-
+{f'''
+{timing_context}
+''' if timing_context else ''}
 Listen to the ENTIRE audio and look at ALL slides. Extract:
 
 ## Memorable Quotes
 Find 5-10 of the most impactful, quotable statements from the speaker.
 - Include the exact quote (or very close paraphrase)
 - Add brief context for each
+- Include the timestamp (MM:SS) when the quote was said
 - Focus on insights that would be valuable to share
 
 ## Notable Statistics
-Any specific numbers, percentages, or data points mentioned
+Any specific numbers, percentages, or data points mentioned (with timestamps)
 
 ## Key Insights
 Unique perspectives or surprising revelations from the talk
 
-Format each quote clearly with quotation marks and attribution.{f'''
+Format each quote clearly with quotation marks, attribution, and timestamp.{f'''
 
 **Additional instructions:** {custom_instructions}''' if custom_instructions else ''}"""
 
-        contents = [gemini_audio]
+        # Build multimodal contents with chronological context
+        contents = []
+
+        # Add audio start timestamp context
+        audio_start_ts = talk.get('audio_start_timestamp')
+        if audio_start_ts:
+            formatted_start = format_datetime_for_prompt(audio_start_ts)
+            if formatted_start:
+                contents.append(f"[Audio recording started at {formatted_start}]")
+
+        contents.append(gemini_audio)
+
+        # Add slides with photo metadata for chronological context
         for i, img_bytes in enumerate(slide_images):
-            contents.append(f"[Slide {i+1}]")
+            slide_num = i + 1
+            meta = slide_metadata[i]
+            filename = meta.get("filename") or f"slide_{slide_num}"
+            taken_at = meta.get("taken_at")
+
+            if taken_at:
+                formatted_taken = format_datetime_for_prompt(taken_at)
+                contents.append(f'[Photo {slide_num} "{filename}" taken at {formatted_taken}]')
+            else:
+                contents.append(f'[Photo {slide_num} "{filename}"]')
             contents.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+
         contents.append(prompt)
 
         gemini_model = get_gemini_model_for_multimodal(model)
@@ -2940,7 +3095,7 @@ Format each quote clearly with quotation marks and attribution.{f'''
         return extract_key_quotes(talk_id, model, custom_instructions)
 
 
-def extract_action_items_multimodal(talk_id: str, model: str = "gemini-2.5-flash", custom_instructions: str = None) -> str:
+def extract_action_items_multimodal(talk_id: str, model: str = "gemini-2.5-pro", custom_instructions: str = None) -> str:
     """Extract action items using audio + slides via Gemini multimodal API."""
     talk = get_talk_by_id(talk_id)
 
@@ -2953,17 +3108,31 @@ def extract_action_items_multimodal(talk_id: str, model: str = "gemini-2.5-flash
     try:
         audio_bytes = fetch_from_storage(audio_url)
         gemini_audio = upload_audio_to_gemini_for_summary(audio_bytes, f"{talk_id}_actions.mp3")
-        slide_images = [fetch_from_storage(url) for url in slide_urls]
+
+        # Normalize slide_urls to list of dicts (backwards compatibility)
+        slide_metadata = []
+        for slide_entry in slide_urls:
+            if isinstance(slide_entry, dict):
+                slide_metadata.append(slide_entry)
+            else:
+                slide_metadata.append({"url": slide_entry, "filename": None, "taken_at": None})
+
+        slide_images = [fetch_from_storage(sm["url"]) for sm in slide_metadata]
+
+        # Build slide timing context
+        timing_context = build_slide_timing_context(talk_id, talk.get('audio_start_timestamp'))
 
         prompt = f"""You are analyzing a conference presentation to extract actionable recommendations.
 
 **Talk:** {talk['title']}
 **Speaker:** {talk.get('speaker', 'Unknown')}
-
+{f'''
+{timing_context}
+''' if timing_context else ''}
 Listen to the ENTIRE audio and look at ALL slides. Extract:
 
 ## Immediate Actions
-Things to do right away based on the talk
+Things to do right away based on the talk (reference slide/timestamp where mentioned)
 
 ## Technologies to Explore
 AWS services, tools, or frameworks recommended
@@ -2972,7 +3141,7 @@ AWS services, tools, or frameworks recommended
 Approaches and patterns suggested by the speaker
 
 ## Resources & Links
-Any URLs, documentation, or resources mentioned
+Any URLs, documentation, or resources mentioned (with timestamp where they appear)
 
 ## Learning Path
 Suggested next steps for deeper learning
@@ -2981,10 +3150,32 @@ Be specific and actionable. Include context for why each item matters.{f'''
 
 **Additional instructions:** {custom_instructions}''' if custom_instructions else ''}"""
 
-        contents = [gemini_audio]
+        # Build multimodal contents with chronological context
+        contents = []
+
+        # Add audio start timestamp context
+        audio_start_ts = talk.get('audio_start_timestamp')
+        if audio_start_ts:
+            formatted_start = format_datetime_for_prompt(audio_start_ts)
+            if formatted_start:
+                contents.append(f"[Audio recording started at {formatted_start}]")
+
+        contents.append(gemini_audio)
+
+        # Add slides with photo metadata for chronological context
         for i, img_bytes in enumerate(slide_images):
-            contents.append(f"[Slide {i+1}]")
+            slide_num = i + 1
+            meta = slide_metadata[i]
+            filename = meta.get("filename") or f"slide_{slide_num}"
+            taken_at = meta.get("taken_at")
+
+            if taken_at:
+                formatted_taken = format_datetime_for_prompt(taken_at)
+                contents.append(f'[Photo {slide_num} "{filename}" taken at {formatted_taken}]')
+            else:
+                contents.append(f'[Photo {slide_num} "{filename}"]')
             contents.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+
         contents.append(prompt)
 
         gemini_model = get_gemini_model_for_multimodal(model)
@@ -3061,19 +3252,42 @@ if "active_view" not in st.session_state:
 if "selected_talk" not in st.session_state:
     st.session_state.selected_talk = None
 if "selected_model" not in st.session_state:
-    st.session_state.selected_model = "gemini-2.5-flash"
+    st.session_state.selected_model = "gemini-2.5-pro"
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "chat_talk_id" not in st.session_state:
     st.session_state.chat_talk_id = None
 if "upload_counter" not in st.session_state:
     st.session_state.upload_counter = 0
+if "current_user_name" not in st.session_state:
+    st.session_state.current_user_name = None
 
 # Get talks
 talks = get_all_talks()
 
 # Get available models (based on configured API keys)
 available_models = get_available_models()
+
+# ============== User Name Prompt ==============
+# Ask for user name once per session (pre-fill from most recent talk)
+if not st.session_state.current_user_name:
+    # Try to get most recent author_name from database
+    default_name = ""
+    if talks and talks[0].get('author_name'):
+        default_name = talks[0]['author_name']
+
+    st.markdown("### Welcome to Conference Talk Notes")
+    st.caption("Please enter your name to attribute your notes.")
+
+    with st.form("user_name_form"):
+        name_input = st.text_input("Your name", value=default_name, placeholder="e.g., John Doe")
+        if st.form_submit_button("Continue", type="primary", use_container_width=True):
+            if name_input.strip():
+                st.session_state.current_user_name = name_input.strip()
+                st.rerun()
+            else:
+                st.warning("Please enter your name")
+    st.stop()
 
 # ============== Top Navigation ==============
 
@@ -3105,60 +3319,59 @@ if st.session_state.active_view == "talks":
 
     # New Talk form in main content
     st.markdown("### Add New Talk")
+    st.caption(":material/auto_awesome: Upload a title slide to auto-fill title & speaker")
 
-    create_method = st.radio("Create method", ["Manual", "From Title Slide"], horizontal=True, label_visibility="collapsed")
-
-    if create_method == "Manual":
-        with st.form("new_talk_form", clear_on_submit=True):
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                new_title = st.text_input("Talk Title", placeholder="SVS301 - Building Serverless Apps...")
-            with col2:
-                new_speaker = st.text_input("Speaker (optional)", placeholder="John Doe")
-
-            if st.form_submit_button("Create Talk", type="primary", use_container_width=True, icon=":material/add:"):
-                if new_title:
-                    talk_id = create_talk(new_title, new_speaker or None)
-                    if talk_id:
-                        st.session_state.selected_talk = talk_id
-                        st.session_state.active_view = "talk_detail"
-                        st.rerun()
-                else:
-                    st.warning("Please enter a talk title")
-    else:
-        # Create from title slide
+    # Image upload (optional) with preview
+    col_upload, col_preview = st.columns([3, 1])
+    with col_upload:
         title_slide = st.file_uploader(
-            "Upload title slide",
+            "Title slide (optional)",
             type=["png", "jpg", "jpeg", "webp", "heic", "heif"],
-            key="title_slide_uploader"
+            key="title_slide_uploader",
+            label_visibility="collapsed"
         )
-
+    with col_preview:
         if title_slide:
             img = Image.open(io.BytesIO(title_slide.getvalue()))
-            st.image(img, width=300)
+            st.image(img, width=80)
 
-            if st.button("Extract Info", icon=":material/auto_awesome:", use_container_width=True):
-                with st.spinner("Analyzing slide..."):
-                    info = extract_talk_info_from_slide(img)
-                    st.session_state.extracted_title = info.get("title") or ""
-                    st.session_state.extracted_speaker = info.get("speaker") or ""
-                st.rerun()
+    # Auto-extract when image uploaded (track by filename)
+    if title_slide:
+        if st.session_state.get("last_title_slide") != title_slide.name:
+            st.session_state.last_title_slide = title_slide.name
+            with st.spinner("Extracting info..."):
+                img = Image.open(io.BytesIO(title_slide.getvalue()))
+                info = extract_talk_info_from_slide(img, st.session_state.selected_model)
+                st.session_state.extracted_title = info.get("title") or ""
+                st.session_state.extracted_speaker = info.get("speaker") or ""
+            st.rerun()
 
-        if "extracted_title" in st.session_state:
-            with st.form("create_from_slide_form"):
-                extracted_title = st.text_input("Title", value=st.session_state.extracted_title)
-                extracted_speaker = st.text_input("Speaker", value=st.session_state.extracted_speaker)
+    # Clear extraction state if no file
+    if not title_slide and "last_title_slide" in st.session_state:
+        del st.session_state.last_title_slide
+        st.session_state.pop("extracted_title", None)
+        st.session_state.pop("extracted_speaker", None)
 
-                if st.form_submit_button("Create Talk", type="primary", use_container_width=True, icon=":material/add:"):
-                    if extracted_title:
-                        talk_id = create_talk(extracted_title, extracted_speaker or None)
-                        del st.session_state.extracted_title
-                        del st.session_state.extracted_speaker
-                        st.session_state.selected_talk = talk_id
-                        st.session_state.active_view = "talk_detail"
-                        st.rerun()
-                    else:
-                        st.warning("Please enter a talk title")
+    # Form with pre-populated values (from extraction or empty)
+    with st.form("new_talk_form", clear_on_submit=True):
+        default_title = st.session_state.get("extracted_title", "")
+        default_speaker = st.session_state.get("extracted_speaker", "")
+
+        new_title = st.text_input("Talk Title", value=default_title, placeholder="SVS301 - Building Serverless Apps...")
+        new_speaker = st.text_input("Speaker (optional)", value=default_speaker, placeholder="John Doe")
+
+        if st.form_submit_button("Create Talk", type="primary", use_container_width=True, icon=":material/add:"):
+            if new_title:
+                talk_id = create_talk(new_title, new_speaker or None, st.session_state.current_user_name)
+                if talk_id:
+                    # Clean up extraction state
+                    for key in ["extracted_title", "extracted_speaker", "last_title_slide"]:
+                        st.session_state.pop(key, None)
+                    st.session_state.selected_talk = talk_id
+                    st.session_state.active_view = "talk_detail"
+                    st.rerun()
+            else:
+                st.warning("Please enter a talk title")
 
     st.divider()
 
@@ -3184,6 +3397,10 @@ if st.session_state.active_view == "talks":
                     # Speaker
                     if t.get('speaker'):
                         st.caption(f":material/person: {t['speaker']}")
+
+                    # Author (notes by)
+                    if t.get('author_name'):
+                        st.caption(f":material/edit: {t['author_name']}")
 
                     # Stats row
                     col_a, col_b = st.columns(2)
@@ -3238,7 +3455,7 @@ elif st.session_state.active_view == "search":
         if results:
             st.markdown("### AI Answer")
             with st.spinner("Generating insights..."):
-                insights = generate_search_insights(query, results)
+                insights = generate_search_insights(query, results, st.session_state.selected_model)
 
             st.markdown(f"""<div class="summary-container">{insights}</div>""", unsafe_allow_html=True)
 
@@ -3269,6 +3486,8 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
     st.title(talk['title'])
     if talk.get('speaker'):
         st.caption(f"Speaker: {talk['speaker']}")
+    if talk.get('author_name'):
+        st.caption(f"Notes by: {talk['author_name']}")
 
     # Stats
     chunks = get_talk_chunks(talk["id"])
@@ -3301,32 +3520,45 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
         # ========== STEP: IDLE (Upload Form) ==========
         if processing_step == 'idle':
             st.markdown("### Upload Content")
-            st.caption("Upload audio and slides for step-by-step processing with validation.")
+            st.caption("Upload audio and slides together for unified processing.")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                upload_audio = st.file_uploader(
-                    "Audio Recording",
-                    type=["mp3", "mp4", "m4a", "wav", "webm"],
-                    key=f"upload_audio_{st.session_state.upload_counter}"
-                )
-            with col2:
-                upload_slides = st.file_uploader(
-                    "Slide Photos",
-                    type=["png", "jpg", "jpeg", "webp", "heic", "heif"],
-                    accept_multiple_files=True,
-                    key=f"upload_slides_{st.session_state.upload_counter}",
-                    help="Photos with EXIF timestamps will be sorted and aligned"
-                )
+            # Unified file uploader - accepts both audio and images
+            AUDIO_TYPES = ["mp3", "mp4", "m4a", "wav", "webm", "qta"]
+            IMAGE_TYPES = ["png", "jpg", "jpeg", "webp", "heic", "heif"]
+
+            uploaded_files = st.file_uploader(
+                "Audio & Slide Photos",
+                type=AUDIO_TYPES + IMAGE_TYPES,
+                accept_multiple_files=True,
+                key=f"upload_files_{st.session_state.upload_counter}",
+                help="Select audio recording and slide photos together"
+            )
+
+            # Separate files by type
+            upload_audio = None
+            upload_slides = []
+
+            if uploaded_files:
+                for f in uploaded_files:
+                    ext = f.name.split('.')[-1].lower()
+                    if ext in AUDIO_TYPES:
+                        if upload_audio is None:
+                            upload_audio = f
+                        else:
+                            st.warning(f"Multiple audio files detected. Using: {upload_audio.name}")
+                    elif ext in IMAGE_TYPES:
+                        upload_slides.append(f)
 
             # Show what will be processed
             if upload_audio or upload_slides:
-                status_parts = []
-                if upload_audio:
-                    status_parts.append(f"1 audio file")
-                if upload_slides:
-                    status_parts.append(f"{len(upload_slides)} slides")
-                st.markdown(f"**Ready to process:** {' + '.join(status_parts)}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if upload_audio:
+                        st.caption(f":material/audio_file: {upload_audio.name}")
+                    else:
+                        st.caption(":material/audio_file: No audio")
+                with col2:
+                    st.caption(f":material/image: {len(upload_slides)} slide(s)")
 
                 if st.button("Start Processing", type="primary", use_container_width=True, icon=":material/auto_awesome:"):
                     # Store files in session state
@@ -3376,7 +3608,8 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                 try:
                     result = step_transcribe_audio(
                         st.session_state.pending_audio_file['bytes'],
-                        st.session_state.pending_audio_file['name']
+                        st.session_state.pending_audio_file['name'],
+                        st.session_state.selected_model
                     )
                     st.session_state.transcript_segments = result['segments']
                     st.session_state.transcript_messages = result['messages']
@@ -3488,7 +3721,8 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                         st.session_state.slides_with_time,
                         st.session_state.transcript_segments,
                         st.session_state.audio_start_time,
-                        st.session_state.use_exif
+                        st.session_state.use_exif,
+                        st.session_state.selected_model
                     )
                     st.session_state.alignment_result = result['alignment']
                     st.session_state.alignment_messages = result['messages']
@@ -4128,10 +4362,11 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
         with st.form("edit_talk_form"):
             edit_title = st.text_input("Title", value=talk["title"])
             edit_speaker = st.text_input("Speaker", value=talk.get("speaker") or "")
+            edit_author = st.text_input("Notes by", value=talk.get("author_name") or "")
 
             if st.form_submit_button("Save Changes", type="primary", use_container_width=True, icon=":material/save:"):
                 if edit_title:
-                    update_talk(talk["id"], edit_title, edit_speaker or None)
+                    update_talk(talk["id"], edit_title, edit_speaker or None, edit_author or None)
                     st.success("Talk updated")
                     st.rerun()
                 else:
