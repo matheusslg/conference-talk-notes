@@ -68,6 +68,21 @@ if not check_password():
 # Constants
 SUPPORTED_AUDIO_FORMATS = [".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".qta"]
 SUPPORTED_IMAGE_FORMATS = [".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"]
+
+# MIME type mapping for audio files (for Gemini API)
+AUDIO_MIME_TYPES = {
+    ".mp3": "audio/mpeg",
+    ".mp4": "audio/mp4",
+    ".mpeg": "audio/mpeg",
+    ".mpga": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+    ".qta": "audio/mp4",  # QTA is typically AAC/MP4 container
+}
+
+# Audio formats that need conversion to MP3 before Gemini upload
+AUDIO_FORMATS_NEED_CONVERSION = {".qta"}
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
@@ -1010,20 +1025,52 @@ def get_audio_creation_time(file_path: str) -> datetime | None:
         return None
 
 
+def convert_audio_to_mp3(input_path: str) -> str:
+    """Convert audio file to MP3 using ffmpeg.
+
+    Returns path to converted MP3 file (caller must clean up).
+    Raises exception if conversion fails.
+    """
+    output_path = tempfile.mktemp(suffix=".mp3")
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-i", input_path, "-vn", "-acodec", "libmp3lame", "-q:a", "2", "-y", output_path],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+        if result.returncode != 0:
+            raise Exception(f"ffmpeg failed: {result.stderr}")
+        return output_path
+    except FileNotFoundError:
+        raise Exception("ffmpeg not found. Please install ffmpeg to convert audio files.")
+
+
 def transcribe_audio_with_timestamps(file_path: str, model: str = "gemini-2.5-pro") -> list[dict]:
     """
     Transcribe audio and return segments with timestamps.
     Returns: [{"start": "00:01:30", "end": "00:02:45", "text": "..."}, ...]
     """
-    uploaded_file = ai.files.upload(file=file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+    converted_path = None
 
-    # Wait for file to be processed
-    import time
-    while uploaded_file.state.name == "PROCESSING":
-        time.sleep(2)
-        uploaded_file = ai.files.get(name=uploaded_file.name)
+    # Convert unsupported formats to MP3
+    if ext in AUDIO_FORMATS_NEED_CONVERSION:
+        converted_path = convert_audio_to_mp3(file_path)
+        file_path = converted_path
+        ext = ".mp3"
 
-    prompt = """Transcribe this audio with timestamps.
+    try:
+        # Get MIME type for the audio file
+        mime_type = AUDIO_MIME_TYPES.get(ext, "audio/mpeg")
+        uploaded_file = ai.files.upload(file=file_path, config={"mime_type": mime_type})
+
+        # Wait for file to be processed
+        while uploaded_file.state.name == "PROCESSING":
+            time.sleep(2)
+            uploaded_file = ai.files.get(name=uploaded_file.name)
+
+        prompt = """Transcribe this audio with timestamps.
 
 Output format (JSON array only, no markdown):
 [
@@ -1038,18 +1085,22 @@ Rules:
 - Timestamps in HH:MM:SS format
 - Output ONLY valid JSON array, no explanation or markdown"""
 
-    gemini_model = get_gemini_model_for_multimodal(model)
-    response = ai.models.generate_content(
-        model=gemini_model,
-        contents=[uploaded_file, prompt]
-    )
+        gemini_model = get_gemini_model_for_multimodal(model)
+        response = ai.models.generate_content(
+            model=gemini_model,
+            contents=[uploaded_file, prompt]
+        )
 
-    text = response.text.strip()
-    # Clean up markdown if present
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        text = response.text.strip()
+        # Clean up markdown if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-    return json.loads(text)
+        return json.loads(text)
+    finally:
+        # Clean up converted file if we created one
+        if converted_path and os.path.exists(converted_path):
+            os.unlink(converted_path)
 
 def parse_timestamp_to_seconds(ts: str) -> float:
     """Convert 'HH:MM:SS' or 'MM:SS' to seconds."""
