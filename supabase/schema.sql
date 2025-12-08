@@ -10,6 +10,8 @@ create table if not exists talks (
   title text not null,
   speaker text,
   event text default 'AWS re:Invent 2025',
+  audio_url text,  -- URL to audio file in Supabase Storage for playback
+  audio_start_timestamp timestamp with time zone,  -- When audio recording started (for alignment)
   created_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now()
 );
@@ -107,3 +109,14 @@ create index if not exists talk_ai_content_talk_id_idx on talk_ai_content(talk_i
 
 -- Migration: Add slide thumbnail for Timeline preview
 -- ALTER TABLE talk_chunks ADD COLUMN slide_thumbnail text;
+
+-- Migration: Add audio URL and start timestamp for playback and alignment
+-- ALTER TABLE talks ADD COLUMN audio_url text;
+-- ALTER TABLE talks ADD COLUMN audio_start_timestamp timestamp with time zone;
+
+-- Migration: Add slide_urls for multimodal summary/insights generation
+-- Stores URLs to original slide images in Supabase Storage
+-- ALTER TABLE talks ADD COLUMN slide_urls jsonb DEFAULT '[]';
+
+-- Storage bucket: talk-slides
+-- Create in Supabase dashboard: Storage > New bucket > "talk-slides" (public access)
