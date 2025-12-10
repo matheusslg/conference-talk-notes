@@ -695,7 +695,7 @@ def delete_talk_dialog(talk_id: str, talk_title: str):
 def reset_processing_state():
     """Clear all processing-related session state."""
     keys_to_clear = [
-        'processing_step', 'pending_talk_id', 'pending_audio_file',
+        'processing_step', 'pending_talk_id', 'pending_audio_files',
         'pending_slide_files', 'transcript_segments', 'alignment_result',
         'slides_with_time', 'audio_start_time', 'audio_url', 'use_exif',
         'multimodal_result', 'multimodal_messages', 'multimodal_model_used',
@@ -704,6 +704,26 @@ def reset_processing_state():
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
+
+
+def get_audio_display_name() -> str:
+    """Get display name for audio files from session state.
+
+    Returns first file name if single file, or combined name if multiple.
+    """
+    audio_files = st.session_state.get('pending_audio_files', [])
+    if not audio_files:
+        return ""
+    if len(audio_files) == 1:
+        return audio_files[0]['name']
+    # Multiple files - show first name with count
+    return f"{audio_files[0]['name']} (+{len(audio_files) - 1} more)"
+
+
+def get_first_audio_file() -> dict | None:
+    """Get the first audio file from session state, for backward compatibility."""
+    audio_files = st.session_state.get('pending_audio_files', [])
+    return audio_files[0] if audio_files else None
 
 
 # ============== Processing ==============
@@ -1191,10 +1211,11 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
                     st.session_state.use_exif = slides_result['use_exif_alignment']
                     st.session_state.slides_messages = slides_result['messages']
 
-                    # Upload audio to storage
+                    # Upload audio to storage (use first file for traditional pipeline)
+                    first_audio = get_first_audio_file()
                     audio_result = step_upload_audio(
-                        st.session_state.pending_audio_file['bytes'],
-                        st.session_state.pending_audio_file['name'],
+                        first_audio['bytes'],
+                        first_audio['name'],
                         st.session_state.pending_talk_id
                     )
                     st.session_state.audio_url = audio_result['audio_url']
@@ -1296,7 +1317,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
 
             with st.spinner("Storing aligned segments..."):
                 try:
-                    audio_name = st.session_state.pending_audio_file['name'] if st.session_state.pending_audio_file else ""
+                    audio_name = get_audio_display_name()
                     result = step_store_segments(
                         st.session_state.pending_talk_id,
                         st.session_state.alignment_result,
@@ -1320,7 +1341,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             with st.spinner("Storing audio segments..."):
                 try:
                     segments = st.session_state.transcript_segments
-                    audio_name = st.session_state.pending_audio_file['name']
+                    audio_name = get_audio_display_name()
                     stored = 0
 
                     for idx, seg in enumerate(segments):
@@ -1374,14 +1395,16 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
             # Show file info
             col1, col2 = st.columns(2)
             with col1:
-                st.metric("Audio File", st.session_state.pending_audio_file['name'])
+                st.metric("Audio File", get_audio_display_name())
             with col2:
                 st.metric("Slides", f"{len(st.session_state.pending_slide_files)} photos")
 
             with st.spinner(f"Processing with {gemini_model}... This may take a few minutes for longer talks."):
                 try:
+                    # For multimodal, use first audio file (multimodal doesn't support multiple yet)
+                    first_audio = get_first_audio_file()
                     result = step_process_multimodal(
-                        st.session_state.pending_audio_file,
+                        first_audio,
                         st.session_state.pending_slide_files,
                         st.session_state.pending_talk_id,
                         model=selected  # Will be converted to Gemini model internally
@@ -1473,7 +1496,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
 
             with st.spinner("Storing aligned segments..."):
                 try:
-                    audio_name = st.session_state.pending_audio_file['name']
+                    audio_name = get_audio_display_name()
                     result = step_store_multimodal_results(
                         st.session_state.pending_talk_id,
                         st.session_state.alignment_result,
