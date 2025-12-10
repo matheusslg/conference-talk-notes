@@ -30,7 +30,7 @@ from src.config import (
     SessionKey,
 )
 from src.utils import parse_timestamp_to_seconds, format_seconds_to_timestamp
-from src.auth import check_password
+from src.auth import check_password, get_user_name, set_user_name
 from src.database import (
     supabase,
     create_talk,
@@ -760,9 +760,10 @@ talks = get_all_talks()
 available_models = get_available_models()
 
 # ============== User Name Prompt ==============
-# Ask for user name once per session (pre-fill from most recent talk)
-if not st.session_state.current_user_name:
-    # Try to get most recent author_name from database
+# Ask for user name once per session (check cookie first, then database)
+user_name = get_user_name()
+if not user_name:
+    # Try to get most recent author_name from database as default
     default_name = ""
     if talks and talks[0].get('author_name'):
         default_name = talks[0]['author_name']
@@ -774,7 +775,7 @@ if not st.session_state.current_user_name:
         name_input = st.text_input("Your name", value=default_name, placeholder="e.g., John Doe")
         if st.form_submit_button("Continue", type="primary", use_container_width=True):
             if name_input.strip():
-                st.session_state.current_user_name = name_input.strip()
+                set_user_name(name_input.strip())
                 st.rerun()
             else:
                 st.warning("Please enter your name")
