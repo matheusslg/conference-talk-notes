@@ -972,6 +972,7 @@ elif st.session_state.active_view == "talk_detail" and st.session_state.selected
     if not talk:
         st.error("Talk not found")
         st.session_state.active_view = "talks"
+        st.session_state.selected_talk = None
         st.rerun()
 
     st.title(talk['title'])

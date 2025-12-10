@@ -41,10 +41,10 @@ def get_all_talks() -> list:
     return talks
 
 
-def get_talk_by_id(talk_id: str) -> dict:
-    """Get a single talk by ID."""
-    result = supabase.from_("talks").select("*").eq("id", talk_id).single().execute()
-    return result.data
+def get_talk_by_id(talk_id: str) -> dict | None:
+    """Get a single talk by ID. Returns None if not found."""
+    result = supabase.from_("talks").select("*").eq("id", talk_id).execute()
+    return result.data[0] if result.data else None
 
 
 def update_talk(talk_id: str, title: str, speaker: str = None, author_name: str = None) -> bool:
