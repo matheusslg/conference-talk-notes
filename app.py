@@ -6,6 +6,16 @@ st.set_page_config(
     layout="wide"
 )
 
+# Custom CSS for max-width on ultra-wide screens
+st.markdown("""
+<style>
+    .stMainBlockContainer {
+        max-width: 1440px;
+        margin: 0 auto;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 from PIL import Image
 from PIL.ExifTags import TAGS
 import pillow_heif
