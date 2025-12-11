@@ -1,8 +1,8 @@
 """Multimodal processing functions for combined audio and slide analysis."""
 
 import io
-import json
 
+import json_repair
 from PIL import Image
 from google.genai import types
 
@@ -143,10 +143,10 @@ def execute_multimodal_request(
         contents=contents
     )
 
-    # Parse JSON response
+    # Parse JSON response (use json_repair to handle malformed LLM output)
     text = response.text.strip()
     # Clean up markdown if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-    return json.loads(text)
+    return json_repair.loads(text)

@@ -7,6 +7,8 @@ import tempfile
 import subprocess
 from datetime import datetime
 
+import json_repair
+
 from src.config import AUDIO_MIME_TYPES, AUDIO_FORMATS_NEED_CONVERSION
 from src.llm import ai
 
@@ -422,7 +424,9 @@ Rules:
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-        return json.loads(text)
+        # Use json_repair to handle malformed JSON from LLM
+        # This handles truncated responses, unescaped characters, etc.
+        return json_repair.loads(text)
     finally:
         # Clean up converted file if we created one
         if converted_path and os.path.exists(converted_path):

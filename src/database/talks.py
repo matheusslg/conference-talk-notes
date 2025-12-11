@@ -1,8 +1,9 @@
 """Talk CRUD operations."""
 
-from src.database.client import supabase
+from src.database.client import supabase, with_retry
 
 
+@with_retry()
 def create_talk(title: str, speaker: str = None, author_name: str = None) -> str:
     """Create a new talk and return its ID."""
     result = supabase.from_("talks").insert({
@@ -13,6 +14,7 @@ def create_talk(title: str, speaker: str = None, author_name: str = None) -> str
     return result.data[0]["id"] if result.data else None
 
 
+@with_retry()
 def get_all_talks() -> list:
     """Get all talks with enriched metadata."""
     result = supabase.from_("talks").select("*").order("created_at", desc=True).execute()
@@ -41,12 +43,14 @@ def get_all_talks() -> list:
     return talks
 
 
+@with_retry()
 def get_talk_by_id(talk_id: str) -> dict | None:
     """Get a single talk by ID. Returns None if not found."""
     result = supabase.from_("talks").select("*").eq("id", talk_id).execute()
     return result.data[0] if result.data else None
 
 
+@with_retry()
 def update_talk(talk_id: str, title: str, speaker: str = None, author_name: str = None) -> bool:
     """Update talk metadata."""
     supabase.from_("talks").update({
@@ -58,12 +62,14 @@ def update_talk(talk_id: str, title: str, speaker: str = None, author_name: str 
     return True
 
 
+@with_retry()
 def delete_talk(talk_id: str) -> bool:
     """Delete a talk and all associated data (via cascade)."""
     supabase.from_("talks").delete().eq("id", talk_id).execute()
     return True
 
 
+@with_retry()
 def update_talk_audio_url(talk_id: str, audio_url: str, transcript: str = None):
     """Update talk with audio URL and optionally transcript."""
     update_data = {"audio_url": audio_url}
@@ -72,6 +78,7 @@ def update_talk_audio_url(talk_id: str, audio_url: str, transcript: str = None):
     supabase.from_("talks").update(update_data).eq("id", talk_id).execute()
 
 
+@with_retry()
 def update_talk_slide_urls(talk_id: str, slide_urls: list):
     """Update talk with slide URLs."""
     supabase.from_("talks").update({"slide_urls": slide_urls}).eq("id", talk_id).execute()

@@ -3,6 +3,8 @@
 import io
 import base64
 from datetime import datetime
+
+import json_repair
 from PIL import Image
 from PIL.ExifTags import TAGS
 
@@ -64,14 +66,13 @@ Output valid JSON only, no markdown or explanation."""
         ]
     )
 
-    import json
     text = response.text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+        return json_repair.loads(text)
+    except Exception:
         return {"title": None, "speaker": None, "session_code": None}
 
 

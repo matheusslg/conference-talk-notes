@@ -6,3 +6,4 @@ anthropic>=0.30.0
 Pillow>=10.0.0
 pillow-heif>=0.18.0
 pdf2image>=1.16.0
+json-repair>=0.30.0

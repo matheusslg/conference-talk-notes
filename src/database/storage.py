@@ -1,8 +1,9 @@
 """Supabase storage operations for audio and slide files."""
 
-from src.database.client import supabase
+from src.database.client import supabase, with_retry
 
 
+@with_retry()
 def upload_audio(filename: str, file_bytes: bytes) -> str:
     """Upload audio file to storage and return public URL."""
     supabase.storage.from_("talk-audio").upload(
@@ -11,6 +12,7 @@ def upload_audio(filename: str, file_bytes: bytes) -> str:
     return supabase.storage.from_("talk-audio").get_public_url(filename)
 
 
+@with_retry()
 def upload_slide(filename: str, file_bytes: bytes, content_type: str = "image/jpeg") -> str:
     """Upload slide image to storage and return public URL."""
     supabase.storage.from_("talk-slides").upload(

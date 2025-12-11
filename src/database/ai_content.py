@@ -1,9 +1,10 @@
 """AI-generated content persistence (summaries, quotes, actions, chat)."""
 
 import json
-from src.database.client import supabase
+from src.database.client import supabase, with_retry
 
 
+@with_retry()
 def save_ai_content(talk_id: str, content_type: str, content: str, model: str):
     """Save AI-generated content (always creates new entry for history)."""
     supabase.from_("talk_ai_content").insert({
@@ -14,6 +15,7 @@ def save_ai_content(talk_id: str, content_type: str, content: str, model: str):
     }).execute()
 
 
+@with_retry()
 def get_all_ai_content(talk_id: str, content_type: str) -> list:
     """Get all stored AI content for a content type, ordered by newest first."""
     result = supabase.from_("talk_ai_content").select(
@@ -22,11 +24,13 @@ def get_all_ai_content(talk_id: str, content_type: str) -> list:
     return result.data or []
 
 
+@with_retry()
 def delete_ai_content(content_id: str):
     """Delete a specific AI content entry."""
     supabase.from_("talk_ai_content").delete().eq("id", content_id).execute()
 
 
+@with_retry()
 def get_ai_content(talk_id: str, content_type: str) -> dict:
     """Get most recent AI content. Returns dict with 'content' and 'model_used' or None."""
     result = supabase.from_("talk_ai_content").select(

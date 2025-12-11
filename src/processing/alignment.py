@@ -3,6 +3,8 @@
 import json
 from datetime import datetime, timedelta
 
+import json_repair
+
 from src.config import AI_ALIGNMENT_PROMPT, PHOTO_CAPTURE_DELAY_SECONDS
 from src.utils import (
     parse_timestamp_to_seconds,
@@ -129,12 +131,12 @@ def align_slides_with_ai(audio_segments: list, slides_data: list, model: str = "
         contents=prompt
     )
 
-    # Parse JSON response
+    # Parse JSON response (use json_repair to handle malformed LLM output)
     text = response.text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-    alignment = json.loads(text)
+    alignment = json_repair.loads(text)
 
     # Validate and deduplicate: ensure each segment is assigned to exactly one slide
     used_indices: set[int] = set()

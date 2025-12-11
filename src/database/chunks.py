@@ -1,14 +1,16 @@
 """Talk chunks operations - segments, transcripts, slides."""
 
-from src.database.client import supabase
+from src.database.client import supabase, with_retry
 
 
+@with_retry()
 def get_talk_chunks(talk_id: str) -> list:
     """Get all chunks for a talk, ordered by creation time."""
     result = supabase.from_("talk_chunks").select("*").eq("talk_id", talk_id).order("created_at").execute()
     return result.data or []
 
 
+@with_retry()
 def get_aligned_segments(talk_id: str) -> list:
     """Get aligned segments with slide numbers and timestamps, ordered by slide number."""
     result = supabase.from_("talk_chunks").select(
@@ -17,6 +19,7 @@ def get_aligned_segments(talk_id: str) -> list:
     return result.data or []
 
 
+@with_retry()
 def get_uploaded_files(talk_id: str) -> dict:
     """Get list of uploaded files grouped by type."""
     chunks = supabase.from_("talk_chunks").select(
@@ -41,6 +44,7 @@ def get_uploaded_files(talk_id: str) -> dict:
     return files
 
 
+@with_retry()
 def insert_chunk(
     talk_id: str,
     content_type: str,
@@ -77,6 +81,7 @@ def insert_chunk(
     supabase.from_("talk_chunks").insert(data).execute()
 
 
+@with_retry()
 def delete_chunks_by_talk(talk_id: str):
     """Delete all chunks for a talk."""
     supabase.from_("talk_chunks").delete().eq("talk_id", talk_id).execute()
